@@ -4,6 +4,7 @@ import argparse
 from contextlib import redirect_stdout
 import importlib.util
 import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -384,14 +385,14 @@ class PreprocessingTests(unittest.TestCase):
                                 "glucose_unique_samples": [10, 288, 144]})
         sleep = quality[preprocessing.KEY].copy()
         sleep["audit_start_seconds"] = sleep.day_in_study * 86400
-        sleep["audit_end_seconds"] = sleep.day_in_study * 86400 + np.array([36000, 36001, 35999])
+        sleep["audit_end_seconds"] = sleep.day_in_study * 86400 + np.array([43200, 43201, 43199])
         sleep["review_selected"] = True
         intervals = quality[preprocessing.KEY].copy()
         intervals = intervals.loc[intervals.index.repeat(6)].reset_index(drop=True)
         intervals["matched_sleep_end_day"] = intervals.day_in_study
         intervals["matched_main_sleep"], intervals["usable_in_main_sleep"] = True, True
         result = preprocessing.aligned_morning_days(quality, sleep, sleep, intervals,
-                                                   preprocessing.eligibility_settings(argparse.Namespace()), 10)
+                                                   preprocessing.eligibility_settings(argparse.Namespace()), 12)
         self.assertEqual(result.aligned_glucose.tolist(), [False, False, True])
         self.assertEqual(result.aligned_rhr.tolist(), [False, True, False])
         self.assertEqual(result.aligned_main_sleep.tolist(), [True, False, True])
@@ -413,8 +414,8 @@ class PreprocessingTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     preprocessing.run_audit(args)
                 runs.append(args)
-                daily = pd.read_csv(args.processed_dir / "morning_alignment_10_2022.csv")
-                eligible = pd.read_csv(args.processed_dir / "eligible_observations_10_2022.csv")
+                daily = pd.read_csv(args.processed_dir / "morning_alignment_12_2022.csv")
+                eligible = pd.read_csv(args.processed_dir / "eligible_observations_12_2022.csv")
                 self.assertTrue(daily.study_interval.eq(2022).all())
                 self.assertFalse(daily.duplicated(preprocessing.KEY).any())
                 self.assertEqual(eligible.id.tolist(), [1] * 3 + [6] * 3 + [11] * 3)
@@ -424,7 +425,11 @@ class PreprocessingTests(unittest.TestCase):
                 early = pd.read_csv(args.processed_dir / "eligible_observations_08_2022.csv")
                 self.assertTrue(early.empty)
                 log = (args.report_dir / "temporal_protocol.md").read_text(encoding="utf-8")
-                self.assertIn("sync times", (args.report_dir / "run_config.json").read_text())
+                config = json.loads((args.report_dir / "run_config.json").read_text())
+                self.assertEqual(config["prediction_cutoff"], "12:00:00")
+                self.assertEqual(config["temporal_settings"]["prediction_cutoff"], "12:00:00")
+                self.assertIn("Primary cutoff: 12:00", log)
+                self.assertIn("sync times", config["temporal_settings"]["availability_assumption"])
                 self.assertIn("not demonstrated real-time deployment", log)
             for attribute in ["processed_dir", "report_dir"]:
                 first, second = [getattr(run, attribute) for run in runs]

@@ -24,6 +24,8 @@ PARTICIPANT_KEY = KEY[:2]
 PHASES = {"menstrual", "follicular", "fertility", "ovulation", "luteal"}
 SECONDS_PER_DAY = 86400
 CGM_INTERVAL_SECONDS = 300
+PRIMARY_CUTOFF_HOUR = 12
+SENSITIVITY_CUTOFF_HOUR = 8
 UNRESOLVED_GLUCOSE_IDS = ()
 MG_DL_GLUCOSE_IDS = (6, 11)
 MG_DL_TO_MMOL_L = 0.0555
@@ -495,7 +497,8 @@ def selected_day_flag(data: pd.DataFrame, column: str) -> pd.DataFrame:
 
 
 def temporal_settings() -> dict:
-    return {"prediction_cutoff": "10:00:00", "sensitivity_cutoff": "08:00:00",
+    return {"prediction_cutoff": f"{PRIMARY_CUTOFF_HOUR:02d}:00:00",
+            "sensitivity_cutoff": f"{SENSITIVITY_CUTOFF_HOUR:02d}:00:00",
             "history_calendar_days": 3, "required_history_days": 3,
             "glucose_lag_days": 1, "resting_heart_rate_lag_days": 1,
             "clock_assumption": "Exported clocks are assumed to be participant-local and mutually aligned; unverified",
@@ -603,9 +606,11 @@ def temporal_attrition(daily: pd.DataFrame, cutoff_hour: int) -> pd.DataFrame:
 
 
 def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame) -> str:
-    lines = ["# Morning alignment and three-day eligibility: mcPHASES 2022", "",
-             "Primary cutoff: 10:00; sensitivity cutoff: 08:00. One three-calendar-day history is used.",
-             "These are analyst-selected protocol choices, not optimised or clinically validated settings.", "",
+    lines = ["# Fixed-cutoff alignment and three-day eligibility: mcPHASES 2022", "",
+             f"Primary cutoff: {PRIMARY_CUTOFF_HOUR:02d}:00; sensitivity cutoff: {SENSITIVITY_CUTOFF_HOUR:02d}:00. One three-calendar-day history is used.",
+             "These are analyst-selected protocol choices, not optimised or clinically validated settings.",
+             "Noon was selected before modelling to admit more completed main-sleep sessions; no current-day daytime inputs are added.",
+             "These counts retain daily RHR for the existing eligibility assessment. Sleeping HR is the planned model input; its replacement audit is pending.", "",
              "For prediction day t, glucose and daily resting heart rate use day t-1.",
              "Sleep and matching temperature use the selected main sleep ending on day t by cutoff.",
              "HRV intervals must fit entirely inside that sleep (start included, end included);",
@@ -647,7 +652,7 @@ def save_temporal_review(tables: dict, daily: pd.DataFrame, args: argparse.Names
     intervals = align_hrv_to_sleep(tables["heart_rate_variability_details"], sleep, settings)
     intervals.to_csv(args.processed_dir / "hrv_sleep_alignment_2022.csv", index=False)
     reports = []
-    for hour in [10, 8]:
+    for hour in [PRIMARY_CUTOFF_HOUR, SENSITIVITY_CUTOFF_HOUR]:
         aligned = aligned_morning_days(quality, sleep, temperature, intervals, settings, hour)
         aligned.to_csv(args.processed_dir / f"morning_alignment_{hour:02d}_2022.csv", index=False)
         aligned.loc[aligned["eligible_prediction"]].to_csv(
@@ -1067,7 +1072,7 @@ def run_audit(args: argparse.Namespace) -> pd.DataFrame:
               "script_sha256": file_sha256(Path(__file__)),
               "glucose_unit_policy": glucose_unit_policy(),
               "cgm_nominal_interval_seconds": CGM_INTERVAL_SECONDS,
-              "prediction_cutoff": "10:00:00" if getattr(args, "temporal_review", False) else None,
+              "prediction_cutoff": temporal_settings()["prediction_cutoff"] if getattr(args, "temporal_review", False) else None,
               "model_ready": False,
               "temporal_review": getattr(args, "temporal_review", False),
               "temporal_settings": temporal_settings() if getattr(args, "temporal_review", False) else None,

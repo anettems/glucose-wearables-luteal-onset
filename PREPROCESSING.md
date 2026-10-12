@@ -164,7 +164,7 @@ descriptive outputs. Use fresh directories:
 & C:/Users/anett/miniconda3/python.exe code/preprocessing.py --temporal-review --processed-dir code/data/processed/temporal_2022 --report-dir results/temporal_2022
 ```
 
-The primary decision is at **10:00**, with an **08:00** sensitivity analysis.
+The primary decision is at **12:00**, with an **08:00** sensitivity analysis.
 The exported clocks are assumed to represent mutually aligned participant-local
 times. Timezones, daylight-saving changes and device synchronisation/publication
 times are unverified. No timezone conversion or arbitrary processing buffer is
@@ -205,10 +205,10 @@ Additional processed outputs:
 
 - `hrv_sleep_alignment_2022.csv`: original interval keys, matched main-sleep
   end day, and interval quality/containment flags.
-- `morning_alignment_10_2022.csv` and `morning_alignment_08_2022.csv`: full
+- `morning_alignment_12_2022.csv` and `morning_alignment_08_2022.csv`: full
   calendar grids, lagged CGM diagnostics, source-day provenance, sleep timing,
   aligned quality flags, usable history counts and `eligible_prediction`.
-- `eligible_observations_10_2022.csv` and `eligible_observations_08_2022.csv`:
+- `eligible_observations_12_2022.csv` and `eligible_observations_08_2022.csv`:
   the single shared eligible observation table for each cutoff.
 
 `temporal_attrition.csv` and `temporal_protocol.md` report cumulative effects
@@ -220,7 +220,8 @@ The script does not construct model features or participant splits, and
 `model_ready` remains false. Feature construction, participant-disjoint splits
 and onset-scoring rules remain subsequent work.
 
-The first run after confirmed unit standardisation is saved separately:
+The historical 10:00 run after confirmed unit standardisation is saved separately
+(the current code uses noon; its current run command is below):
 
 ```powershell
 & C:/Users/anett/miniconda3/python.exe code/preprocessing.py --temporal-review --processed-dir code/data/processed/temporal_units_2022 --report-dir results/temporal_units_2022
@@ -229,3 +230,37 @@ The first run after confirmed unit standardisation is saved separately:
 Earlier generated folders retain the historical pre-confirmation audit and
 must not be treated as current cohort outputs. Regenerate in fresh destinations
 to reproduce the corrected protocol; never manually edit old generated files.
+
+## Current noon protocol and planned sleeping HR
+
+The primary fixed cutoff is 12:00, with 08:00 retained as the existing sensitivity.
+Only prior-day CGM and completed overnight measurements are used; daytime
+measurements from the prediction day are not added. Noon allows more completed
+main sleeps to qualify, but does not establish actual synchronisation times.
+
+Current outputs are regenerated in `code/data/processed/temporal_noon_2022/`
+and `results/temporal_noon_2022/` using:
+
+```powershell
+& C:/Users/anett/miniconda3/python.exe code/preprocessing.py --temporal-review --processed-dir code/data/processed/temporal_noon_2022 --report-dir results/temporal_noon_2022
+```
+
+These outputs retain daily RHR as an eligibility requirement. The intended model
+will instead use sleeping HR alongside overnight HRV and skin temperature. The
+raw README describes `sleep_score.csv.resting_heart_rate` as resting HR during
+sleep. It is a candidate source, not a documented minimum-HR measure. Its exact
+aggregation and publication time are unspecified. A read-only 2022 inspection
+found 3,372 positive HR records across 42 participants; 3,238 matched a main
+sleep end day and timestamp exactly. Multiple records on some days require
+session matching rather than averaging daily values. The remaining 134 records
+need review. This inspection is not a completed eligibility or feature audit.
+
+HRV comes from `heart_rate_variability_details.csv`, whose timestamp denotes
+the start of a five-minute interval. RMSSD is the primary quality-screened HRV
+measure; coverage is a quality field. Low- and high-frequency power are also
+available. Sleep remains alignment/quality metadata, not a set of model predictors.
+The cohort must be regenerated after the sleeping-HR replacement is verified.
+
+The completed noon run retained 35 participants, 1,120 labelled prediction days,
+and 32 eligible exact reference-transition dates under the existing RHR rule.
+These are provisional eligibility counts, not model performance or a sleeping-HR cohort.

@@ -44,6 +44,38 @@ def write_synthetic_exports(raw_dir):
         pd.DataFrame(records).to_csv(raw_dir / f"{name}.csv", index=False)
 
 
+def write_temporal_exports(raw_dir):
+    write_synthetic_exports(raw_dir)
+    for path in raw_dir.glob("*.csv"):
+        original = pd.read_csv(path).iloc[[0]]
+        records = []
+        for day in range(1, 7):
+            item = original.copy()
+            if "day_in_study" in item:
+                item["day_in_study"] = day
+            if path.stem == "hormones_and_selfreport":
+                item["phase"] = "Follicular" if day < 4 else "Luteal"
+            if "sleep_end_day_in_study" in item:
+                start_day, start_hour = (1, 0) if day == 1 else (day - 1, 23)
+                end_hour = 9 if day == 4 else 7
+                item["sleep_start_day_in_study"] = start_day
+                item["sleep_end_day_in_study"] = day
+                item["sleep_start_timestamp"] = f"{start_hour:02d}:00:00"
+                item["sleep_end_timestamp"] = f"{end_hour:02d}:00:00"
+                if path.stem == "sleep":
+                    minutes = ((day - start_day) * 24 + end_hour - start_hour) * 60
+                    item["duration"], item["timeinbed"], item["minutesasleep"] = minutes * 60000, minutes, minutes
+            if path.stem in ["glucose", "heart_rate_variability_details"]:
+                minutes = range(0, 1440, 5) if path.stem == "glucose" else range(60, 90, 5)
+                item = item.loc[item.index.repeat(len(minutes))].reset_index(drop=True)
+                item["timestamp"] = [f"{minute // 60:02d}:{minute % 60:02d}:00" for minute in minutes]
+                if path.stem == "heart_rate_variability_details":
+                    item["coverage"] = 1.005
+            records.append(item)
+        first = pd.concat(records, ignore_index=True)
+        pd.concat([first, first.assign(id=6), first.assign(study_interval=2024)]).to_csv(path, index=False)
+
+
 class PreprocessingTests(unittest.TestCase):
     def test_filter_precedes_key_validation_and_preserves_raw(self):
         with tempfile.TemporaryDirectory(dir=MODULE_PATH.parent / "tests") as directory:
@@ -302,6 +334,98 @@ class PreprocessingTests(unittest.TestCase):
             log = (args.report_dir / "decision_log.md").read_text(encoding="utf-8")
             self.assertIn("all three primary input sets", log)
             self.assertIn("not be used as the final modelling cohort", log)
+
+
+    def test_hrv_matches_whole_intervals_to_sleep_across_midnight(self):
+        start = 86400 + 23 * 3600
+        end = 2 * 86400 + 7 * 3600
+        sleep = pd.DataFrame({"id": [1], "study_interval": [2022], "day_in_study": [2],
+                              "audit_start_seconds": [start], "audit_end_seconds": [end],
+                              "review_selected": [True]})
+        starts = [start, start + 55 * 60, end - 300, end - 120, start - 120, start]
+        data = pd.DataFrame({"id": [1] * 5 + [2], "study_interval": [2022] * 6,
+                             "day_in_study": [1, 1, 2, 2, 1, 1], "timestamp": ["00:00:00"] * 6,
+                             "rmssd": [20] * 6, "coverage": [1.005] * 6,
+                             "audit_end_seconds": np.array(starts) + 300,
+                             "audit_structurally_usable": [True] * 6})
+        matched = preprocessing.align_hrv_to_sleep(data, sleep, preprocessing.eligibility_settings(argparse.Namespace()))
+        self.assertEqual(matched.matched_main_sleep.tolist(), [True, True, True, False, False, False])
+        self.assertEqual(matched.matched_sleep_end_day.fillna(-1).tolist(), [2, 2, 2, -1, -1, -1])
+        counts = preprocessing.sleep_hrv_counts(matched)
+        self.assertEqual(counts.hrv_main_sleep_quality_windows.tolist(), [3])
+        self.assertEqual(counts.day_in_study.tolist(), [2])
+        self.assertEqual(matched.day_in_study.tolist(), data.day_in_study.tolist())
+
+    def test_calendar_history_cannot_bridge_gaps_or_participants(self):
+        daily = pd.DataFrame({"id": [1] * 5 + [2], "study_interval": [2022] * 6,
+                              "day_in_study": [1, 2, 4, 5, 6, 3],
+                              "phase": [None, "follicular", None, None, "luteal", "luteal"],
+                              "aligned_inputs_available": [True] * 6})
+        result = preprocessing.add_calendar_history(daily)
+        self.assertEqual(result.history_usable_days.tolist(), [1, 2, 2, 2, 3, 1])
+        self.assertEqual(result.eligible_prediction.tolist(), [False, False, False, False, True, False])
+        self.assertEqual(result.history_first_glucose_day.iloc[4], 3)
+        self.assertEqual(result.history_first_aligned_day.iloc[4], 4)
+
+    def test_morning_alignment_uses_prior_day_and_inclusive_cutoff(self):
+        quality = pd.DataFrame({"id": [1] * 3, "study_interval": [2022] * 3,
+                                "day_in_study": [1, 2, 3], "phase": ["follicular"] * 3,
+                                "luteal_status": [0] * 3, "exact_luteal_onset": [None, 0, 0],
+                                "uncertain_luteal_entry": [False] * 3, "quality_units_accepted": [True] * 3,
+                                "quality_glucose": [False, True, True], "quality_rhr": [True, False, True],
+                                "glucose_unique_samples": [10, 288, 144]})
+        sleep = quality[preprocessing.KEY].copy()
+        sleep["audit_start_seconds"] = sleep.day_in_study * 86400
+        sleep["audit_end_seconds"] = sleep.day_in_study * 86400 + np.array([36000, 36001, 35999])
+        sleep["review_selected"] = True
+        intervals = quality[preprocessing.KEY].copy()
+        intervals = intervals.loc[intervals.index.repeat(6)].reset_index(drop=True)
+        intervals["matched_sleep_end_day"] = intervals.day_in_study
+        intervals["matched_main_sleep"], intervals["usable_in_main_sleep"] = True, True
+        result = preprocessing.aligned_morning_days(quality, sleep, sleep, intervals,
+                                                   preprocessing.eligibility_settings(argparse.Namespace()), 10)
+        self.assertEqual(result.aligned_glucose.tolist(), [False, False, True])
+        self.assertEqual(result.aligned_rhr.tolist(), [False, True, False])
+        self.assertEqual(result.aligned_main_sleep.tolist(), [True, False, True])
+        self.assertEqual(result.aligned_hrv.tolist(), [True, False, True])
+        self.assertEqual(result.aligned_temperature.tolist(), [True, False, True])
+        self.assertEqual(result.prior_day_glucose_unique_samples.iloc[1:].tolist(), [10, 288])
+        self.assertFalse(result.eligible_prediction.any())
+
+    def test_temporal_review_reproducibility_exclusion_and_history(self):
+        with tempfile.TemporaryDirectory(dir=MODULE_PATH.parent / "tests") as directory:
+            root = Path(directory)
+            raw_dir = root / "raw"
+            write_temporal_exports(raw_dir)
+            hashes = {path.name: preprocessing.file_sha256(path) for path in raw_dir.glob("*.csv")}
+            runs = []
+            for number in [1, 2]:
+                args = argparse.Namespace(raw_dir=raw_dir, processed_dir=root / f"processed_{number}",
+                                          report_dir=root / f"reports_{number}", temporal_review=True)
+                with redirect_stdout(io.StringIO()):
+                    preprocessing.run_audit(args)
+                runs.append(args)
+                daily = pd.read_csv(args.processed_dir / "morning_alignment_10_2022.csv")
+                eligible = pd.read_csv(args.processed_dir / "eligible_observations_10_2022.csv")
+                self.assertTrue(daily.study_interval.eq(2022).all())
+                self.assertFalse(daily.duplicated(preprocessing.KEY).any())
+                self.assertEqual(eligible.id.tolist(), [1, 1, 1])
+                self.assertEqual(eligible.day_in_study.tolist(), [4, 5, 6])
+                self.assertTrue(eligible.history_usable_days.eq(3).all())
+                self.assertEqual(int(eligible.exact_luteal_onset.eq(1).sum()), 1)
+                early = pd.read_csv(args.processed_dir / "eligible_observations_08_2022.csv")
+                self.assertTrue(early.empty)
+                log = (args.report_dir / "temporal_protocol.md").read_text(encoding="utf-8")
+                self.assertIn("sync times", (args.report_dir / "run_config.json").read_text())
+                self.assertIn("not demonstrated real-time deployment", log)
+            for attribute in ["processed_dir", "report_dir"]:
+                first, second = [getattr(run, attribute) for run in runs]
+                for path in first.glob("*.csv"):
+                    self.assertEqual(path.read_bytes(), (second / path.name).read_bytes())
+            self.assertEqual((runs[0].report_dir / "temporal_protocol.md").read_bytes(),
+                             (runs[1].report_dir / "temporal_protocol.md").read_bytes())
+            for path in raw_dir.glob("*.csv"):
+                self.assertEqual(preprocessing.file_sha256(path), hashes[path.name])
 
 
 if __name__ == "__main__":

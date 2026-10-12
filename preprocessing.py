@@ -88,6 +88,8 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--eligibility-review", action="store_true",
                         help="Also generate quality-rule evidence, effects and a decision log")
+    parser.add_argument("--temporal-review", action="store_true",
+                        help="Also align morning inputs and require three usable calendar days")
     parser.add_argument("--min-glucose-coverage", type=float, default=0.70)
     parser.add_argument("--max-glucose-gap-hours", type=float, default=4.0)
     parser.add_argument("--min-hrv-coverage", type=float, default=0.80)
@@ -457,6 +459,170 @@ def selected_day_flag(data: pd.DataFrame, column: str) -> pd.DataFrame:
     return data.groupby(KEY)["review_selected"].any().rename(column).reset_index()
 
 
+def temporal_settings() -> dict:
+    return {"prediction_cutoff": "10:00:00", "sensitivity_cutoff": "08:00:00",
+            "history_calendar_days": 3, "required_history_days": 3,
+            "glucose_lag_days": 1, "resting_heart_rate_lag_days": 1,
+            "clock_assumption": "Exported clocks are assumed to be participant-local and mutually aligned; unverified",
+            "availability_assumption": "Completed prior-day summaries and completed main-sleep measurements are assumed available by cutoff; sync times unverified",
+            "synchronisation_verified": False, "timezone_verified": False}
+
+
+def align_hrv_to_sleep(data: pd.DataFrame, sleep: pd.DataFrame,
+                       settings: dict) -> pd.DataFrame:
+    """Match whole five-minute intervals to selected, non-overlapping main sleep."""
+    columns = KEY + ["timestamp", "rmssd", "coverage", "audit_end_seconds",
+                     "audit_structurally_usable"]
+    result = data[columns].copy().reset_index(drop=True)
+    result["audit_start_seconds"] = result["audit_end_seconds"] - CGM_INTERVAL_SECONDS
+    result["matched_sleep_end_day"] = pd.Series(pd.NA, index=result.index, dtype="Int64")
+    selected = sleep.loc[sleep["review_selected"]]
+    for key, indices in result.groupby(PARTICIPANT_KEY).indices.items():
+        sessions = selected.loc[selected["id"].eq(key[0]) & selected["study_interval"].eq(key[1])]
+        sessions = sessions.sort_values("audit_start_seconds")
+        if sessions.empty:
+            continue
+        starts = result.loc[indices, "audit_start_seconds"].to_numpy()
+        ends = result.loc[indices, "audit_end_seconds"].to_numpy()
+        positions = np.searchsorted(sessions["audit_start_seconds"].to_numpy(), starts, side="right") - 1
+        clipped = np.maximum(positions, 0)
+        matched = (positions >= 0) & np.isfinite(starts) & np.isfinite(ends)
+        matched &= ends <= sessions["audit_end_seconds"].to_numpy()[clipped]
+        days = sessions["day_in_study"].to_numpy()[clipped]
+        result.loc[indices[matched], "matched_sleep_end_day"] = days[matched]
+    result["matched_main_sleep"] = result["matched_sleep_end_day"].notna()
+    coverage = pd.to_numeric(result["coverage"], errors="coerce")
+    result["usable_in_main_sleep"] = primary_records(result, "rmssd") & result["matched_main_sleep"]
+    result["usable_in_main_sleep"] &= coverage.ge(settings["min_hrv_coverage"])
+    return result
+
+
+def sleep_hrv_counts(intervals: pd.DataFrame) -> pd.DataFrame:
+    matched = intervals.loc[intervals["matched_main_sleep"]].copy()
+    matched["day_in_study"] = matched["matched_sleep_end_day"].astype("int64")
+    return matched.groupby(KEY)["usable_in_main_sleep"].sum().rename(
+        "hrv_main_sleep_quality_windows").reset_index()
+
+
+def lag_daily_columns(daily: pd.DataFrame, columns: dict) -> pd.DataFrame:
+    """Join by the preceding calendar day, never by the preceding available row."""
+    result = daily[KEY + list(columns)].rename(columns=columns).copy()
+    result["day_in_study"] += 1
+    return result
+
+
+def add_calendar_history(daily: pd.DataFrame) -> pd.DataFrame:
+    result = daily.copy()
+    result["history_usable_days"] = 0
+    for lag in range(temporal_settings()["history_calendar_days"]):
+        previous = daily[KEY + ["aligned_inputs_available"]].copy()
+        previous["day_in_study"] += lag
+        previous = previous.rename(columns={"aligned_inputs_available": "_history_usable"})
+        result = join_daily(result, previous)
+        result["history_usable_days"] += result.pop("_history_usable").fillna(False).astype(int)
+    # Historical phase labels are not predictors and need not be present.
+    result["eligible_prediction"] = result["history_usable_days"].eq(3) & result["phase"].notna()
+    result["history_first_aligned_day"] = result["day_in_study"] - 2
+    result["history_first_glucose_day"] = result["day_in_study"] - 3
+    return result
+
+
+def aligned_morning_days(quality: pd.DataFrame, sleep: pd.DataFrame,
+                         temperature: pd.DataFrame, intervals: pd.DataFrame,
+                         settings: dict, cutoff_hour: int) -> pd.DataFrame:
+    columns = KEY + ["phase", "luteal_status", "exact_luteal_onset",
+                     "uncertain_luteal_entry", "quality_units_accepted"]
+    result = quality[columns].copy()
+    glucose = {column: f"prior_day_{column}" for column in quality if column.startswith("glucose_")}
+    glucose["quality_glucose"] = "aligned_glucose"
+    result = join_daily(result, lag_daily_columns(quality, glucose))
+    result = join_daily(result, lag_daily_columns(quality, {"quality_rhr": "aligned_rhr"}))
+    selected = sleep.loc[sleep["review_selected"], KEY + ["audit_start_seconds", "audit_end_seconds"]]
+    result = join_daily(result, selected.rename(columns={"audit_start_seconds": "main_sleep_start_seconds",
+                                                       "audit_end_seconds": "main_sleep_end_seconds"}))
+    result["prediction_cutoff_seconds"] = result["day_in_study"] * SECONDS_PER_DAY + cutoff_hour * 3600
+    result["prior_day_source_day"] = result["day_in_study"] - 1
+    result["aligned_main_sleep"] = result["main_sleep_end_seconds"].le(result["prediction_cutoff_seconds"])
+    result = join_daily(result, sleep_hrv_counts(intervals))
+    result["hrv_main_sleep_quality_windows"] = result["hrv_main_sleep_quality_windows"].fillna(0).astype(int)
+    result["aligned_hrv"] = result["hrv_main_sleep_quality_windows"].ge(settings["min_hrv_windows"])
+    result["aligned_hrv"] &= result["aligned_main_sleep"]
+    result = join_daily(result, selected_day_flag(temperature, "_matched_temperature"))
+    result["aligned_temperature"] = result.pop("_matched_temperature").fillna(False).astype(bool)
+    result["aligned_temperature"] &= result["aligned_main_sleep"]
+    flags = ["quality_units_accepted", "aligned_glucose", "aligned_rhr", "aligned_main_sleep",
+             "aligned_hrv", "aligned_temperature"]
+    result[flags] = result[flags].fillna(False).astype(bool)
+    result["aligned_inputs_available"] = result[flags].all(axis=1)
+    return add_calendar_history(result)
+
+
+def temporal_attrition(daily: pd.DataFrame, cutoff_hour: int) -> pd.DataFrame:
+    mask = daily["phase"].notna()
+    rows = [{"stage": "recognised_labels", **availability_counts(daily, mask)}]
+    for column in ["quality_units_accepted", "aligned_glucose", "aligned_rhr", "aligned_main_sleep",
+                   "aligned_hrv", "aligned_temperature", "eligible_prediction"]:
+        mask &= daily[column]
+        rows.append({"stage": column, **availability_counts(daily, mask)})
+    return pd.DataFrame(rows).assign(cutoff_hour=cutoff_hour)
+
+
+def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame) -> str:
+    lines = ["# Morning alignment and three-day eligibility: mcPHASES 2022", "",
+             "Primary cutoff: 10:00; sensitivity cutoff: 08:00. One three-calendar-day history is used.",
+             "These are analyst-selected protocol choices, not optimised or clinically validated settings.", "",
+             "For prediction day t, glucose and daily resting heart rate use day t-1.",
+             "Sleep and matching temperature use the selected main sleep ending on day t by cutoff.",
+             "HRV intervals must fit entirely inside that sleep (start included, end included);",
+             "five-minute interval completion is checked, including midnight crossings.",
+             "The existing CGM quality thresholds and HRV coverage/count rules are retained.",
+             "IDs 6 and 11 remain excluded from every primary input comparison.", "",
+             "Each prediction requires usable aligned inputs on t-2, t-1 and t, with no missing days.",
+             "This uses glucose/RHR source dates t-3 through t-1 and sleep end dates t-2 through t.",
+             "Only the target day's recognised phase label is required; historical labels are not inputs.",
+             "No imputation, full-cycle normalisation or future data is used. No seven-day history is required.", "",
+             "## Cumulative eligibility", "",
+             "| Cutoff | Requirement added | Participants | Labelled days | Exact transition dates |",
+             "|---|---|---:|---:|---:|"]
+    for row in attrition.itertuples():
+        lines.append(f"| {row.cutoff_hour:02d}:00 | {row.stage} | {row.participants} | {row.labelled_days} | {row.exact_transitions} |")
+    lines += ["", f"HRV interval diagnostics: {len(intervals)} retained intervals; "
+              f"{int(intervals['matched_main_sleep'].sum())} fit a selected main sleep; "
+              f"{int(intervals['usable_in_main_sleep'].sum())} also pass HRV quality checks.", "",
+              "## Assumptions and limitations", "",
+              "Export clocks are assumed to be mutually aligned participant-local clocks. Timezones and",
+              "daylight-saving changes are not verified; no timezone conversion is applied.",
+              "Completed prior-day summaries and completed sleep measurements are assumed available by cutoff.",
+              "Sync, publication and revision times are unavailable/unverified. A sleep end before cutoff",
+              "does not prove actual availability; no arbitrary processing buffer is treated as proof.",
+              "This is a retrospective timing-constrained cohort under stated availability assumptions,",
+              "not demonstrated real-time deployment. No model-ready feature matrix or data splits are produced.",
+              "Transition counts only require an eligible reference date. Event matching, neighbouring",
+              "evaluation days and onset scoring remain to be specified before model evaluation.",
+              "The 08:00 sensitivity has its own shared cohort; within each cutoff all three modalities",
+              "use identical eligible observation keys. Any between-cutoff performance comparison will need",
+              "a common-key restriction or an explicit account of the changed cohort."]
+    return "\n".join(lines) + "\n"
+
+
+def save_temporal_review(tables: dict, daily: pd.DataFrame, args: argparse.Namespace) -> None:
+    settings = eligibility_settings(args)
+    quality, sleep, temperature = build_quality_review(tables, daily, settings)
+    intervals = align_hrv_to_sleep(tables["heart_rate_variability_details"], sleep, settings)
+    intervals.to_csv(args.processed_dir / "hrv_sleep_alignment_2022.csv", index=False)
+    reports = []
+    for hour in [10, 8]:
+        aligned = aligned_morning_days(quality, sleep, temperature, intervals, settings, hour)
+        aligned.to_csv(args.processed_dir / f"morning_alignment_{hour:02d}_2022.csv", index=False)
+        aligned.loc[aligned["eligible_prediction"]].to_csv(
+            args.processed_dir / f"eligible_observations_{hour:02d}_2022.csv", index=False)
+        reports.append(temporal_attrition(aligned, hour))
+    attrition = pd.concat(reports, ignore_index=True)
+    attrition.to_csv(args.report_dir / "temporal_attrition.csv", index=False)
+    (args.report_dir / "temporal_protocol.md").write_text(
+        temporal_protocol_text(attrition, intervals), encoding="utf-8")
+
+
 def build_quality_review(tables: dict, daily: pd.DataFrame, settings: dict) -> tuple:
     sleep = review_sleep_sessions(tables["sleep"], settings)
     temperature = review_temperature_sessions(tables["computed_temperature"], sleep)
@@ -822,6 +988,8 @@ def save_outputs(tables: dict, daily: pd.DataFrame, summaries: list,
 
 def run_audit(args: argparse.Namespace) -> pd.DataFrame:
     settings = eligibility_settings(args)
+    if getattr(args, "temporal_review", False):
+        args.eligibility_review = True
     for attribute in ["raw_dir", "processed_dir", "report_dir"]:
         setattr(args, attribute, getattr(args, attribute).resolve())
     validate_output_paths(args.raw_dir, [args.processed_dir, args.report_dir])
@@ -842,13 +1010,18 @@ def run_audit(args: argparse.Namespace) -> pd.DataFrame:
     save_outputs(tables, daily, summaries, checks, distributions, inventory, args)
     if getattr(args, "eligibility_review", False):
         save_eligibility_review(tables, daily, args)
+    if getattr(args, "temporal_review", False):
+        save_temporal_review(tables, daily, args)
     config = {"study_interval": STUDY_INTERVAL, "raw_dir": str(args.raw_dir),
               "processed_dir": str(args.processed_dir), "report_dir": str(args.report_dir),
               "python_version": platform.python_version(), "pandas_version": pd.__version__,
               "numpy_version": np.__version__, "source_sha256": hashes,
               "script_sha256": file_sha256(Path(__file__)),
               "cgm_nominal_interval_seconds": CGM_INTERVAL_SECONDS,
-              "prediction_cutoff": None, "model_ready": False,
+              "prediction_cutoff": "10:00:00" if getattr(args, "temporal_review", False) else None,
+              "model_ready": False,
+              "temporal_review": getattr(args, "temporal_review", False),
+              "temporal_settings": temporal_settings() if getattr(args, "temporal_review", False) else None,
               "eligibility_review": getattr(args, "eligibility_review", False),
               "quality_review_settings": settings if getattr(args, "eligibility_review", False) else None}
     (args.report_dir / "run_config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")

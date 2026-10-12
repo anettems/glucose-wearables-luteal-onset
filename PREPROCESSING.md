@@ -138,3 +138,68 @@ They do not prove actual device availability. Fitbit documents HRV processing
 after sleep and synchronisation; the export lacks verified sync/processing
 times and timezone conventions. Prior-day CGM, overnight HRV alignment, the
 fixed morning cutoff and trailing calendar histories remain a separate step.
+
+## Morning alignment and three-day eligibility
+
+The accepted temporal protocol is implemented as an optional extension. It
+also runs the initial audit and quality review, preserving those separate
+descriptive outputs. Use fresh directories:
+
+```powershell
+& C:/Users/anett/miniconda3/python.exe code/preprocessing.py --temporal-review --processed-dir code/data/processed/temporal_2022 --report-dir results/temporal_2022
+```
+
+The primary decision is at **10:00**, with an **08:00** sensitivity analysis.
+The exported clocks are assumed to represent mutually aligned participant-local
+times. Timezones, daylight-saving changes and device synchronisation/publication
+times are unverified. No timezone conversion or arbitrary processing buffer is
+applied. Completed prior-day summaries and completed main-sleep measurements
+are assumed available by cutoff; the outputs do not demonstrate actual
+real-time availability. These assumptions are recorded in `run_config.json`
+and `temporal_protocol.md`.
+
+For each prediction day `t`:
+
+- CGM uses the completed calendar day `t-1`, with the existing 70% nominal
+  observed-time and maximum four-hour uncovered-gap requirements.
+- Daily resting heart rate uses `t-1`, because current-day summary availability
+  is not established.
+- Sleep and matching temperature use the selected main sleep ending on `t`
+  at or before the cutoff. A session ending later is unavailable; no fallback
+  to an earlier night is substituted for that day's measurement.
+- HRV intervals must fall wholly inside that selected sleep, including
+  intervals beginning on the preceding calendar day. Start and end boundaries
+  are inclusive, and each interval ends five minutes after its timestamp.
+  At least six usable intervals with coverage at least 0.8 are required per
+  selected sleep. Source day keys are preserved in the alignment diagnostics.
+- IDs 6 and 11 remain excluded consistently from every primary input set.
+
+Exactly **three usable consecutive calendar days** of aligned inputs are
+required: `t-2`, `t-1`, and `t`. Consequently, the glucose/RHR source dates
+span `t-3` through `t-1`, and wearable sleep end dates span `t-2` through `t`.
+Calendar-key joins prevent missing dates from being compressed into consecutive
+rows and prevent participant or study-interval boundaries from being crossed.
+All required signals must pass on all three days, even for the single-modality
+comparisons, so the three primary models share identical eligible keys.
+Only the target day's recognised phase label is required; earlier phase labels
+are not predictors or history requirements. There is no imputation and no
+seven-day alternative or long-term personal baseline in this protocol.
+
+Additional processed outputs:
+
+- `hrv_sleep_alignment_2022.csv`: original interval keys, matched main-sleep
+  end day, and interval quality/containment flags.
+- `morning_alignment_10_2022.csv` and `morning_alignment_08_2022.csv`: full
+  calendar grids, lagged CGM diagnostics, source-day provenance, sleep timing,
+  aligned quality flags, usable history counts and `eligible_prediction`.
+- `eligible_observations_10_2022.csv` and `eligible_observations_08_2022.csv`:
+  the single shared eligible observation table for each cutoff.
+
+`temporal_attrition.csv` and `temporal_protocol.md` report cumulative effects
+and assumptions. Exact transition counts require an eligible reference date;
+they do not yet establish evaluable onset events or account for event-matching
+requirements. Each cutoff has its own shared cohort. Comparisons between
+cutoffs must account for the changed cohort or restrict to common keys.
+The script does not construct model features or participant splits, and
+`model_ready` remains false. Feature construction, participant-disjoint splits
+and onset-scoring rules remain subsequent work.

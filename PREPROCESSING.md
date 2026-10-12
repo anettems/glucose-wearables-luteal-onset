@@ -71,3 +71,70 @@ Before modelling, fix the morning cutoff, measurement-availability assumptions,
 duplicate resolution, units, minimum coverage, history requirements and common
 eligibility rules. This audit does not establish independent hormone validation
 or prospective prediction performance.
+
+## Eligibility decision review
+
+Run the extension with fresh output directories:
+
+```powershell
+& C:/Users/anett/miniconda3/python.exe code/preprocessing.py --eligibility-review --processed-dir code/data/processed/eligibility_2022 --report-dir results/eligibility_2022
+```
+
+The additional `decision_log.md` explains six decisions, cites the reviewed
+primary documentation, and gives before/after participant, labelled-day and
+exact-transition counts. `decision_sources.json` records the source review
+date, URLs, local README hash and selected settings. The program uses this
+documented evidence locally; it does not fetch web pages on each run.
+
+Default quality-review rules are:
+
+- Exclude IDs 6 and 11 from every primary input comparison until their glucose
+  units are independently confirmed. Raw values remain unchanged. A difference
+  in value scale or integer precision does not establish a unit conversion.
+  Other IDs provisionally follow the export documentation. Reinstatement
+  requires documented correction and regeneration of all paired cohorts.
+- Resting heart rate requires a positive finite value and an unambiguous daily
+  key. Equal values on different study days are retained. No averaging rule is
+  introduced for 2022 records.
+- HRV requires coverage at least 0.8 and at least six usable five-minute
+  intervals per exported day. Values above one are retained without clipping
+  or weighting because Fitbit does not document an upper bound. Their cause
+  remains unverified. The alternative upper bound of one is reported separately.
+- CGM requires a nominal observed-time fraction of at least 0.70 and a longest
+  uncovered period of at most four hours, including gaps at midnight. Sample
+  counts, occupied bins, cadence and interior/boundary gaps are also reported.
+- Sleep selection requires a single valid main sleep per end day, without
+  overlap with another main sleep. Naps and ambiguous multiple-main days are
+  excluded. Elapsed time and exported sleep duration may differ by at most
+  60 seconds to allow minute granularity. Temperature requires SKIN type,
+  positive integer sample counts, and an exact start/end match with the selected
+  main sleep; multiple qualifying temperatures on one end day are excluded.
+- Exact phase transitions require adjacent recognised non-luteal/luteal labels.
+  Uncertain entries are classified as interval-censored, left-censored or
+  possible continuations of an already observed luteal segment. They are not
+  counted as extra exact events.
+
+The coverage, window-count and duration-tolerance thresholds are analyst
+choices for a reproducible quality review, not validated clinical limits.
+Coverage sensitivity tables compare CGM coverage of 0.70/0.80/0.90 and maximum
+gaps of two/four hours, and HRV coverage of 0.70/0.80/0.90 with three/six/twelve
+intervals and optional exclusion of values above one. The chosen settings
+are also included when they differ from these values. CLI settings are
+`--min-glucose-coverage`, `--max-glucose-gap-hours`, `--min-hrv-coverage` and
+`--min-hrv-windows`.
+
+Additional processed tables are `quality_review_daily_2022.csv`,
+`session_review_2022.csv` and `phase_transition_review_2022.csv`. Reports are
+`rule_effects.csv`, `same_day_quality_attrition.csv`, `glucose_unit_evidence.csv`,
+`coverage_sensitivity.csv` and `session_end_time_sensitivity.csv`.
+
+All effects currently use the original exported calendar day. Transition counts
+require that reference day alone, without surrounding sensor histories.
+Independent rule effects are not additive. `same_day_quality_overlap` is one
+shared preview mask for the three input sets; it must not be used directly for
+prospective modelling. Hypothetical session end-clock comparisons at 06:00,
+08:00, 10:00 and 12:00 quantify timing sensitivity without selecting a cutoff.
+They do not prove actual device availability. Fitbit documents HRV processing
+after sleep and synchronisation; the export lacks verified sync/processing
+times and timezone conventions. Prior-day CGM, overnight HRV alignment, the
+fixed morning cutoff and trailing calendar histories remain a separate step.

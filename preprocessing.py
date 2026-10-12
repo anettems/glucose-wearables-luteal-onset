@@ -25,7 +25,6 @@ PHASES = {"menstrual", "follicular", "fertility", "ovulation", "luteal"}
 SECONDS_PER_DAY = 86400
 CGM_INTERVAL_SECONDS = 300
 PRIMARY_CUTOFF_HOUR = 12
-SENSITIVITY_CUTOFF_HOUR = 8
 UNRESOLVED_GLUCOSE_IDS = ()
 MG_DL_GLUCOSE_IDS = (6, 11)
 MG_DL_TO_MMOL_L = 0.0555
@@ -498,7 +497,6 @@ def selected_day_flag(data: pd.DataFrame, column: str) -> pd.DataFrame:
 
 def temporal_settings() -> dict:
     return {"prediction_cutoff": f"{PRIMARY_CUTOFF_HOUR:02d}:00:00",
-            "sensitivity_cutoff": f"{SENSITIVITY_CUTOFF_HOUR:02d}:00:00",
             "history_calendar_days": 3, "required_history_days": 3,
             "glucose_lag_days": 1, "resting_heart_rate_lag_days": 1,
             "clock_assumption": "Exported clocks are assumed to be participant-local and mutually aligned; unverified",
@@ -607,8 +605,8 @@ def temporal_attrition(daily: pd.DataFrame, cutoff_hour: int) -> pd.DataFrame:
 
 def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame) -> str:
     lines = ["# Fixed-cutoff alignment and three-day eligibility: mcPHASES 2022", "",
-             f"Primary cutoff: {PRIMARY_CUTOFF_HOUR:02d}:00; sensitivity cutoff: {SENSITIVITY_CUTOFF_HOUR:02d}:00. One three-calendar-day history is used.",
-             "These are analyst-selected protocol choices, not optimised or clinically validated settings.",
+             f"Primary cutoff: {PRIMARY_CUTOFF_HOUR:02d}:00. One three-calendar-day history is used.",
+             "These are analyst-selected protocol choices, not optimised or clinically validated settings. Only noon is evaluated.",
              "Noon was selected before modelling to admit more completed main-sleep sessions; no current-day daytime inputs are added.",
              "These counts retain daily RHR for the existing eligibility assessment. Sleeping HR is the planned model input; its replacement audit is pending.", "",
              "For prediction day t, glucose and daily resting heart rate use day t-1.",
@@ -640,9 +638,7 @@ def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame) -> 
               "not demonstrated real-time deployment. No model-ready feature matrix or data splits are produced.",
               "Transition counts only require an eligible reference date. Event matching, neighbouring",
               "evaluation days and onset scoring remain to be specified before model evaluation.",
-              "The 08:00 sensitivity has its own shared cohort; within each cutoff all three modalities",
-              "use identical eligible observation keys. Any between-cutoff performance comparison will need",
-              "a common-key restriction or an explicit account of the changed cohort."]
+              "All three modalities use identical eligible observation keys at the single noon cutoff."]
     return "\n".join(lines) + "\n"
 
 
@@ -651,14 +647,12 @@ def save_temporal_review(tables: dict, daily: pd.DataFrame, args: argparse.Names
     quality, sleep, temperature = build_quality_review(tables, daily, settings)
     intervals = align_hrv_to_sleep(tables["heart_rate_variability_details"], sleep, settings)
     intervals.to_csv(args.processed_dir / "hrv_sleep_alignment_2022.csv", index=False)
-    reports = []
-    for hour in [PRIMARY_CUTOFF_HOUR, SENSITIVITY_CUTOFF_HOUR]:
-        aligned = aligned_morning_days(quality, sleep, temperature, intervals, settings, hour)
-        aligned.to_csv(args.processed_dir / f"morning_alignment_{hour:02d}_2022.csv", index=False)
-        aligned.loc[aligned["eligible_prediction"]].to_csv(
-            args.processed_dir / f"eligible_observations_{hour:02d}_2022.csv", index=False)
-        reports.append(temporal_attrition(aligned, hour))
-    attrition = pd.concat(reports, ignore_index=True)
+    hour = PRIMARY_CUTOFF_HOUR
+    aligned = aligned_morning_days(quality, sleep, temperature, intervals, settings, hour)
+    aligned.to_csv(args.processed_dir / f"morning_alignment_{hour:02d}_2022.csv", index=False)
+    aligned.loc[aligned["eligible_prediction"]].to_csv(
+        args.processed_dir / f"eligible_observations_{hour:02d}_2022.csv", index=False)
+    attrition = temporal_attrition(aligned, hour)
     attrition.to_csv(args.report_dir / "temporal_attrition.csv", index=False)
     (args.report_dir / "temporal_protocol.md").write_text(
         temporal_protocol_text(attrition, intervals), encoding="utf-8")

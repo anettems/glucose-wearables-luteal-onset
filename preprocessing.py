@@ -65,6 +65,10 @@ TABLE_SPECS = {
         "values": ["glucose_value"], "positive": ["glucose_value"],
         "timestamp": "timestamp",
     },
+    "sleep_score": {
+        "values": ["resting_heart_rate"], "positive": ["resting_heart_rate"],
+        "timestamp": "timestamp",
+    },
     "resting_heart_rate": {
         "values": ["value", "error"], "positive": ["value"],
     },
@@ -440,6 +444,48 @@ def review_sleep_sessions(data: pd.DataFrame, settings: dict) -> pd.DataFrame:
     return data
 
 
+def review_sleeping_heart_rate(data: pd.DataFrame, sleep: pd.DataFrame) -> pd.DataFrame:
+    """Use exact session ends; naps, ambiguous ends and unmatched scores are excluded."""
+    keys = KEY + ["audit_end_seconds"]
+    ends = sleep.groupby(keys).agg(
+        matched_sleep_sessions=("id", "size"),
+        matched_main_sessions=("review_main_sleep", "sum"),
+        matched_selected_sessions=("review_selected", "sum"),
+    ).reset_index()
+    result = data.merge(ends, on=keys, how="left", validate="many_to_one")
+    counts = ["matched_sleep_sessions", "matched_main_sessions", "matched_selected_sessions"]
+    result[counts] = result[counts].fillna(0).astype(int)
+    unique = result["matched_sleep_sessions"].eq(1)
+    selected = result["matched_selected_sessions"].eq(1)
+    result["review_selected"] = primary_records(result, "resting_heart_rate") & unique & selected
+    result["review_match_status"] = np.select(
+        [result["matched_sleep_sessions"].eq(0), ~unique,
+         result["matched_main_sessions"].eq(0), ~selected,
+         ~primary_records(result, "resting_heart_rate")],
+        ["unmatched_end", "ambiguous_end", "non_main_sleep", "unselected_main_sleep", "invalid_or_missing_hr"],
+        default="selected_main_sleep",
+    )
+    result["sleeping_hr_bpm"] = pd.to_numeric(result["resting_heart_rate"], errors="coerce")
+    main = sleep.loc[sleep["review_selected"], KEY + ["audit_end_seconds"]].rename(
+        columns={"audit_end_seconds": "selected_main_sleep_end_seconds"})
+    result = join_daily_scores_to_main(result, main)
+    return result
+
+
+def join_daily_scores_to_main(scores: pd.DataFrame, main: pd.DataFrame) -> pd.DataFrame:
+    """Retain end-time discrepancies as diagnostics, never as matching tolerances."""
+    result = scores.merge(main, on=KEY, how="left", validate="many_to_one")
+    result["score_minus_main_end_seconds"] = (
+        result["audit_end_seconds"] - result["selected_main_sleep_end_seconds"])
+    return result
+
+
+def sleeping_hr_daily(scores: pd.DataFrame) -> pd.DataFrame:
+    selected = scores.loc[scores["review_selected"], KEY + ["sleeping_hr_bpm", "timestamp"]]
+    return selected.rename(columns={"timestamp": "sleeping_hr_source_timestamp"}).assign(
+        quality_sleeping_hr=True)
+
+
 def review_temperature_sessions(data: pd.DataFrame, sleep: pd.DataFrame) -> pd.DataFrame:
     data = data.copy()
     session_key = PARTICIPANT_KEY + ["audit_start_seconds", "audit_end_seconds"]
@@ -498,7 +544,11 @@ def selected_day_flag(data: pd.DataFrame, column: str) -> pd.DataFrame:
 def temporal_settings() -> dict:
     return {"prediction_cutoff": f"{PRIMARY_CUTOFF_HOUR:02d}:00:00",
             "history_calendar_days": 3, "required_history_days": 3,
-            "glucose_lag_days": 1, "resting_heart_rate_lag_days": 1,
+            "glucose_lag_days": 1, "sleeping_heart_rate_lag_days": 0,
+            "heart_rate_source": "sleep_score.csv.resting_heart_rate",
+            "heart_rate_unit": "bpm",
+            "heart_rate_interpretation": "Fitbit-reported sleeping HR; aggregation unspecified",
+            "sleep_score_timestamp_assumption": "Score timestamp is matched exactly to selected main-sleep end; not a publication time",
             "clock_assumption": "Exported clocks are assumed to be participant-local and mutually aligned; unverified",
             "availability_assumption": "Completed prior-day summaries and completed main-sleep measurements are assumed available by cutoff; sync times unverified",
             "synchronisation_verified": False, "timezone_verified": False}
@@ -572,13 +622,17 @@ def aligned_morning_days(quality: pd.DataFrame, sleep: pd.DataFrame,
     glucose = {column: f"prior_day_{column}" for column in quality if column.startswith("glucose_")}
     glucose["quality_glucose"] = "aligned_glucose"
     result = join_daily(result, lag_daily_columns(quality, glucose))
-    result = join_daily(result, lag_daily_columns(quality, {"quality_rhr": "aligned_rhr"}))
+    result = join_daily(result, quality[KEY + ["quality_sleeping_hr", "sleeping_hr_bpm",
+                                               "sleeping_hr_source_timestamp"]])
     selected = sleep.loc[sleep["review_selected"], KEY + ["audit_start_seconds", "audit_end_seconds"]]
     result = join_daily(result, selected.rename(columns={"audit_start_seconds": "main_sleep_start_seconds",
                                                        "audit_end_seconds": "main_sleep_end_seconds"}))
     result["prediction_cutoff_seconds"] = result["day_in_study"] * SECONDS_PER_DAY + cutoff_hour * 3600
     result["prior_day_source_day"] = result["day_in_study"] - 1
     result["aligned_main_sleep"] = result["main_sleep_end_seconds"].le(result["prediction_cutoff_seconds"])
+    result["sleeping_hr_source_day"] = result["day_in_study"]
+    result["aligned_sleeping_hr"] = result.pop("quality_sleeping_hr").fillna(False).astype(bool)
+    result["aligned_sleeping_hr"] &= result["aligned_main_sleep"]
     result = join_daily(result, sleep_hrv_counts(intervals))
     result["hrv_main_sleep_quality_windows"] = result["hrv_main_sleep_quality_windows"].fillna(0).astype(int)
     result["aligned_hrv"] = result["hrv_main_sleep_quality_windows"].ge(settings["min_hrv_windows"])
@@ -586,7 +640,7 @@ def aligned_morning_days(quality: pd.DataFrame, sleep: pd.DataFrame,
     result = join_daily(result, selected_day_flag(temperature, "_matched_temperature"))
     result["aligned_temperature"] = result.pop("_matched_temperature").fillna(False).astype(bool)
     result["aligned_temperature"] &= result["aligned_main_sleep"]
-    flags = ["quality_units_accepted", "aligned_glucose", "aligned_rhr", "aligned_main_sleep",
+    flags = ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep", "aligned_sleeping_hr",
              "aligned_hrv", "aligned_temperature"]
     result[flags] = result[flags].fillna(False).astype(bool)
     result["aligned_inputs_available"] = result[flags].all(axis=1)
@@ -596,7 +650,7 @@ def aligned_morning_days(quality: pd.DataFrame, sleep: pd.DataFrame,
 def temporal_attrition(daily: pd.DataFrame, cutoff_hour: int) -> pd.DataFrame:
     mask = daily["phase"].notna()
     rows = [{"stage": "recognised_labels", **availability_counts(daily, mask)}]
-    for column in ["quality_units_accepted", "aligned_glucose", "aligned_rhr", "aligned_main_sleep",
+    for column in ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep", "aligned_sleeping_hr",
                    "aligned_hrv", "aligned_temperature", "eligible_prediction"]:
         mask &= daily[column]
         rows.append({"stage": column, **availability_counts(daily, mask)})
@@ -608,16 +662,18 @@ def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame) -> 
              f"Primary cutoff: {PRIMARY_CUTOFF_HOUR:02d}:00. One three-calendar-day history is used.",
              "These are analyst-selected protocol choices, not optimised or clinically validated settings. Only noon is evaluated.",
              "Noon was selected before modelling to admit more completed main-sleep sessions; no current-day daytime inputs are added.",
-             "These counts retain daily RHR for the existing eligibility assessment. Sleeping HR is the planned model input; its replacement audit is pending.", "",
-             "For prediction day t, glucose and daily resting heart rate use day t-1.",
+             "Sleeping HR replaces the daily RHR requirement and comes from sleep_score.csv.resting_heart_rate (bpm).", "",
+             "For prediction day t, glucose uses day t-1; sleeping HR uses the selected main sleep ending on t.",
              "Sleep and matching temperature use the selected main sleep ending on day t by cutoff.",
+             "Sleep-score HR requires an exact end-day/end-time match to one selected main sleep; naps and unmatched or ambiguous scores are excluded.",
+             "The supplied sleeping HR aggregation is unspecified; the score timestamp is not assumed to be a publication time.",
              "HRV intervals must fit entirely inside that sleep (start included, end included);",
              "five-minute interval completion is checked, including midnight crossings.",
              "The existing CGM quality thresholds and HRV coverage/count rules are retained.",
              "IDs 6 and 11 have user-confirmed mg/dL values, standardised to mmol/L; they pass the unit gate.",
              "Their inclusion still requires the same signal, timing and history rules as every participant.", "",
              "Each prediction requires usable aligned inputs on t-2, t-1 and t, with no missing days.",
-             "This uses glucose/RHR source dates t-3 through t-1 and sleep end dates t-2 through t.",
+             "This uses glucose source dates t-3 through t-1 and sleeping HR/HRV/temperature sleep end dates t-2 through t.",
              "Only the target day's recognised phase label is required; historical labels are not inputs.",
              "No imputation, full-cycle normalisation or future data is used. No seven-day history is required.", "",
              "## Cumulative eligibility", "",
@@ -642,6 +698,41 @@ def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame) -> 
     return "\n".join(lines) + "\n"
 
 
+def save_hr_source_comparison(aligned: pd.DataFrame, quality: pd.DataFrame,
+                              args: argparse.Namespace) -> None:
+    """Isolate the HR source change on the same calendar and unchanged other rules."""
+    legacy = join_daily(aligned, lag_daily_columns(quality, {"quality_rhr": "_legacy_rhr"}))
+    flags = ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep",
+             "aligned_hrv", "aligned_temperature"]
+    legacy["aligned_inputs_available"] = legacy[flags].all(axis=1) & legacy["_legacy_rhr"].fillna(False)
+    legacy = add_calendar_history(legacy)
+    rows = [{"hr_source": name, **availability_counts(data, data["eligible_prediction"])}
+            for name, data in [("legacy_prior_day_rhr", legacy), ("same_sleep_score_hr", aligned)]]
+    pd.DataFrame(rows).to_csv(args.report_dir / "hr_source_cohort_comparison.csv", index=False)
+    changes = aligned[KEY + ["eligible_prediction"]].rename(
+        columns={"eligible_prediction": "eligible_sleeping_hr"})
+    changes["eligible_legacy_rhr"] = legacy["eligible_prediction"]
+    changes.loc[changes.eligible_sleeping_hr.ne(changes.eligible_legacy_rhr)].to_csv(
+        args.report_dir / "hr_source_eligibility_changes.csv", index=False)
+    gained = int((changes.eligible_sleeping_hr & ~changes.eligible_legacy_rhr).sum())
+    lost = int((~changes.eligible_sleeping_hr & changes.eligible_legacy_rhr).sum())
+    lines = ["# Sleeping HR replacement decision", "",
+             "Use Fitbit-reported sleep_score.csv.resting_heart_rate in bpm instead of daily RHR.",
+             "Require finite positive HR and an exact unambiguous selected-main-sleep end match.",
+             "Exclude non-main sessions, unmatched ends and conflicting keys; do not average or guess matches.",
+             "Sleeping HR/HRV/temperature use the same main sleep ending on t by noon; CGM uses t-1.",
+             "All required signals must pass on t-2, t-1 and t. Daily RHR is descriptive only.", "",
+             "| HR source | Participants | Labelled days | Exact transition dates |",
+             "|---|---:|---:|---:|"]
+    lines += [f"| {row['hr_source']} | {row['participants']} | {row['labelled_days']} | {row['exact_transitions']} |" for row in rows]
+    lines += ["", f"Compared with daily RHR: {gained} eligible days gained and {lost} lost.",
+              "See hr_source_eligibility_changes.csv for observation keys and sleeping_hr_excluded_scores.csv for excluded sources.",
+              "Unmatched ends are excluded; end-time discrepancies are retained in sleeping_hr_session_review_2022.csv and their cause is unverified.",
+              "Noon, CGM/HRV/temperature quality and history rules are unchanged. These are cohort counts, not model performance.",
+              "The HR aggregation algorithm and actual publication/sync times remain unspecified."]
+    (args.report_dir / "sleeping_hr_decision.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def save_temporal_review(tables: dict, daily: pd.DataFrame, args: argparse.Namespace) -> None:
     settings = eligibility_settings(args)
     quality, sleep, temperature = build_quality_review(tables, daily, settings)
@@ -652,6 +743,7 @@ def save_temporal_review(tables: dict, daily: pd.DataFrame, args: argparse.Names
     aligned.to_csv(args.processed_dir / f"morning_alignment_{hour:02d}_2022.csv", index=False)
     aligned.loc[aligned["eligible_prediction"]].to_csv(
         args.processed_dir / f"eligible_observations_{hour:02d}_2022.csv", index=False)
+    save_hr_source_comparison(aligned, quality, args)
     attrition = temporal_attrition(aligned, hour)
     attrition.to_csv(args.report_dir / "temporal_attrition.csv", index=False)
     (args.report_dir / "temporal_protocol.md").write_text(
@@ -661,7 +753,10 @@ def save_temporal_review(tables: dict, daily: pd.DataFrame, args: argparse.Names
 def build_quality_review(tables: dict, daily: pd.DataFrame, settings: dict) -> tuple:
     sleep = review_sleep_sessions(tables["sleep"], settings)
     temperature = review_temperature_sessions(tables["computed_temperature"], sleep)
-    result = join_daily(daily, hrv_quality_counts(tables["heart_rate_variability_details"], settings))
+    scores = review_sleeping_heart_rate(tables["sleep_score"], sleep)
+    result = join_daily(daily, sleeping_hr_daily(scores))
+    result["quality_sleeping_hr"] = result["quality_sleeping_hr"].fillna(False).astype(bool)
+    result = join_daily(result, hrv_quality_counts(tables["heart_rate_variability_details"], settings))
     result = join_daily(result, selected_day_flag(sleep, "quality_main_sleep"))
     result = join_daily(result, selected_day_flag(temperature, "quality_temperature"))
     for column in ["hrv_quality_windows", "hrv_bounded_quality_windows", "hrv_coverage_above_one_windows"]:
@@ -673,7 +768,7 @@ def build_quality_review(tables: dict, daily: pd.DataFrame, settings: dict) -> t
     result["quality_glucose"] &= result["glucose_longest_uncovered_seconds"].le(settings["max_glucose_gap_hours"] * 3600)
     result["quality_hrv"] = result["hrv_quality_windows"].ge(settings["min_hrv_windows"])
     result["quality_rhr"] = result["resting_heart_rate_available_records"].gt(0)
-    flags = ["quality_units_accepted", "quality_glucose", "quality_hrv", "quality_rhr",
+    flags = ["quality_units_accepted", "quality_glucose", "quality_hrv", "quality_sleeping_hr",
              "quality_main_sleep", "quality_temperature"]
     result["same_day_quality_overlap"] = result[flags].all(axis=1) & result["phase"].notna()
     return result, sleep, temperature
@@ -698,7 +793,7 @@ def quality_rule_effects(daily: pd.DataFrame, settings: dict) -> pd.DataFrame:
     labelled = daily["phase"].notna()
     cases = [
         ("standardised_glucose_units_from_confirmed_mapping", labelled, labelled & daily["quality_units_accepted"]),
-        ("resting_heart_rate_structural_checks", daily["resting_heart_rate_records"].gt(0), daily["quality_rhr"]),
+        ("sleeping_heart_rate_selected_main_sleep", daily["sleep_score_records"].gt(0), daily["quality_sleeping_hr"]),
         ("hrv_minimum_coverage_and_window_count", daily["heart_rate_variability_details_available_records"].gt(0), daily["quality_hrv"]),
         ("hrv_optional_upper_bound_one_sensitivity", daily["quality_hrv"], daily["hrv_bounded_quality_windows"].ge(settings["min_hrv_windows"])),
         ("glucose_observed_time_and_longest_gap", daily["glucose_available_records"].gt(0), daily["quality_glucose"]),
@@ -711,8 +806,8 @@ def quality_rule_effects(daily: pd.DataFrame, settings: dict) -> pd.DataFrame:
 def quality_attrition(daily: pd.DataFrame) -> pd.DataFrame:
     mask = daily["phase"].notna()
     rows = [{"stage": "recognised_labels", **availability_counts(daily, mask)}]
-    for column in ["quality_units_accepted", "quality_glucose", "quality_rhr", "quality_hrv",
-                   "quality_main_sleep", "quality_temperature"]:
+    for column in ["quality_units_accepted", "quality_glucose", "quality_main_sleep", "quality_sleeping_hr", "quality_hrv",
+                   "quality_temperature"]:
         mask &= daily[column]
         rows.append({"stage": column, **availability_counts(daily, mask)})
     return pd.DataFrame(rows)
@@ -793,7 +888,9 @@ def decision_log_text(effects: pd.DataFrame, attrition: pd.DataFrame,
              "2. **Resting heart rate:** exact duplicates are removed and conflicting daily keys excluded.",
              f"   Retained 2022 RHR records have {evidence['rhr_conflicting_rows']} conflicting-key rows; no aggregation is needed when this is zero.",
              "   Equal values on different days",
-             "   are retained. Require a positive finite value. Daily RHR availability at a morning cutoff remains open.",
+             "   are retained for descriptive audit only. Daily RHR is not an eligibility requirement.",
+             "   Sleeping HR uses finite positive sleep_score.csv.resting_heart_rate with an unambiguous exact selected-main-sleep end match.",
+             "   Naps, unmatched ends and conflicting score keys are excluded without averaging or nearest-time substitution.",
              "3. **HRV coverage:** Fitbit defines interbeat-interval completeness without an upper bound;",
              "   the local README describes a nominal five-minute ratio but cautions that definitions may be approximate.",
              f"   Require coverage >= {settings['min_hrv_coverage']:g} and >= {settings['min_hrv_windows']} usable intervals/day; retain overshoots",
@@ -839,6 +936,9 @@ def decision_log_text(effects: pd.DataFrame, attrition: pd.DataFrame,
 def save_eligibility_review(tables: dict, daily: pd.DataFrame, args: argparse.Namespace) -> None:
     settings = eligibility_settings(args)
     quality, sleep, temperature = build_quality_review(tables, daily, settings)
+    scores = review_sleeping_heart_rate(tables["sleep_score"], sleep)
+    scores.to_csv(args.processed_dir / "sleeping_hr_session_review_2022.csv", index=False)
+    scores.loc[~scores["review_selected"]].to_csv(args.report_dir / "sleeping_hr_excluded_scores.csv", index=False)
     transitions = phase_transition_review(daily)
     sessions = pd.concat([session_diagnostics(sleep, "sleep"),
                           session_diagnostics(temperature, "computed_temperature")], ignore_index=True)
@@ -942,7 +1042,7 @@ Luteal entries with an unknown immediately preceding label: {uncertain}
 
 ## Scope and interpretation
 
-Only study_interval == 2022 is retained. Six tables are fully audited:
+Only study_interval == 2022 is retained. Seven tables are fully audited:
 {', '.join(TABLE_SPECS)}. Other CSV files are inventoried by size and header
 only. In particular, continuous heart_rate.csv has not been quality-audited.
 This is descriptive preparation, not a model-ready cohort or a performance evaluation.
@@ -1002,7 +1102,7 @@ No clinical or causal conclusions can be drawn from this audit.
 ## Reproducibility
 
 run_config.json records arguments, software versions, and source SHA-256 hashes.
-Hashes of the six audited CSVs are checked again before saving outputs.
+Hashes of all audited CSVs are checked again before saving outputs.
 Daily joins enforce one-to-one keys. Outputs never overwrite a non-empty
 directory; use new --processed-dir and --report-dir paths for another run.
 """

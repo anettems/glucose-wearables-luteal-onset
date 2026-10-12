@@ -36,6 +36,8 @@ def write_synthetic_exports(raw_dir):
                                "sleep_end_day_in_study": day,
                                "sleep_start_timestamp": "00:00:00",
                                "sleep_end_timestamp": "07:00:00"})
+            if name == "sleep_score":
+                record["timestamp"] = "07:00:00"
             if name == "computed_temperature":
                 record["type"] = "SKIN"
             if name == "sleep":
@@ -66,6 +68,10 @@ def write_temporal_exports(raw_dir):
                 if path.stem == "sleep":
                     minutes = ((day - start_day) * 24 + end_hour - start_hour) * 60
                     item["duration"], item["timeinbed"], item["minutesasleep"] = minutes * 60000, minutes, minutes
+            if path.stem == "resting_heart_rate":
+                item["value"] = 0  # RHR must not exclude observations with usable sleeping HR.
+            if path.stem == "sleep_score":
+                item["timestamp"] = "09:00:00" if day == 4 else "07:00:00"
             if path.stem in ["glucose", "heart_rate_variability_details"]:
                 minutes = range(0, 1440, 5) if path.stem == "glucose" else range(60, 90, 5)
                 item = item.loc[item.index.repeat(len(minutes))].reset_index(drop=True)
@@ -381,7 +387,9 @@ class PreprocessingTests(unittest.TestCase):
                                 "day_in_study": [1, 2, 3], "phase": ["follicular"] * 3,
                                 "luteal_status": [0] * 3, "exact_luteal_onset": [None, 0, 0],
                                 "uncertain_luteal_entry": [False] * 3, "quality_units_accepted": [True] * 3,
-                                "quality_glucose": [False, True, True], "quality_rhr": [True, False, True],
+                                "quality_glucose": [False, True, True], "quality_rhr": [False] * 3,
+                                "quality_sleeping_hr": [True] * 3, "sleeping_hr_bpm": [60, 61, 62],
+                                "sleeping_hr_source_timestamp": ["12:00:00", "12:00:01", "11:59:59"],
                                 "glucose_unique_samples": [10, 288, 144]})
         sleep = quality[preprocessing.KEY].copy()
         sleep["audit_start_seconds"] = sleep.day_in_study * 86400
@@ -394,7 +402,10 @@ class PreprocessingTests(unittest.TestCase):
         result = preprocessing.aligned_morning_days(quality, sleep, sleep, intervals,
                                                    preprocessing.eligibility_settings(argparse.Namespace()), 12)
         self.assertEqual(result.aligned_glucose.tolist(), [False, False, True])
-        self.assertEqual(result.aligned_rhr.tolist(), [False, True, False])
+        self.assertNotIn("aligned_rhr", result)
+        self.assertEqual(result.aligned_sleeping_hr.tolist(), [True, False, True])
+        self.assertEqual(result.sleeping_hr_source_day.tolist(), [1, 2, 3])
+        self.assertEqual(result.sleeping_hr_bpm.tolist(), [60, 61, 62])
         self.assertEqual(result.aligned_main_sleep.tolist(), [True, False, True])
         self.assertEqual(result.aligned_hrv.tolist(), [True, False, True])
         self.assertEqual(result.aligned_temperature.tolist(), [True, False, True])
@@ -443,6 +454,42 @@ class PreprocessingTests(unittest.TestCase):
             for path in raw_dir.glob("*.csv"):
                 self.assertEqual(preprocessing.file_sha256(path), hashes[path.name])
 
+
+    def test_sleep_score_audit_filters_interval_and_preserves_conflicts(self):
+        with tempfile.TemporaryDirectory(dir=MODULE_PATH.parent / "tests") as directory:
+            path = Path(directory) / "sleep_score.csv"
+            path.write_text("id,study_interval,day_in_study,timestamp,resting_heart_rate\n"
+                            "1,2022,1,07:00:00,60\n1,2022,1,07:00:00,60\n"
+                            "1,2022,2,07:00:00,61\n1,2022,2,07:00:00,62\n"
+                            "1,2022,3,07:00:00,\n1,2022,4,07:00:00,0\n"
+                            "bad,2024,bad,bad,bad\n", encoding="utf-8")
+            source = path.read_bytes()
+            data, summary, _ = preprocessing.audit_table(
+                Path(directory), "sleep_score", preprocessing.TABLE_SPECS["sleep_score"])
+            self.assertEqual(summary["excluded_other_interval_rows"], 1)
+            self.assertEqual(summary["exact_duplicates_removed"], 1)
+            self.assertEqual(summary["conflicting_key_rows"], 2)
+            self.assertEqual(int(preprocessing.primary_records(data, "resting_heart_rate").sum()), 1)
+            self.assertEqual(path.read_bytes(), source)
+
+    def test_sleeping_hr_requires_exact_unique_selected_session(self):
+        sleep = pd.DataFrame({"id": [1, 1, 2, 2], "study_interval": [2022] * 4,
+                              "day_in_study": [2] * 4,
+                              "audit_end_seconds": [198000, 205200, 198000, 198000],
+                              "review_main_sleep": [True, False, True, True],
+                              "review_selected": [True, False, True, False]})
+        data = pd.DataFrame({"id": [1, 1, 1, 1, 3, 2], "study_interval": [2022] * 6,
+                             "day_in_study": [2] * 6,
+                             "audit_end_seconds": [198000, 205200, 198001, 198000, 198000, 198000],
+                             "timestamp": ["07:00:00"] * 6,
+                             "resting_heart_rate": [60, 61, 62, None, 64, 65],
+                             "audit_structurally_usable": [True] * 6})
+        result = preprocessing.review_sleeping_heart_rate(data, sleep)
+        self.assertEqual(result.review_selected.tolist(), [True, False, False, False, False, False])
+        self.assertEqual(result.review_match_status.tolist(),
+                         ["selected_main_sleep", "non_main_sleep", "unmatched_end",
+                          "invalid_or_missing_hr", "unmatched_end", "ambiguous_end"])
+        self.assertEqual(preprocessing.sleeping_hr_daily(result).sleeping_hr_bpm.tolist(), [60])
 
     def test_glucose_conversion_preserves_source_values_and_rejects_double_conversion(self):
         data = pd.DataFrame({"id": [1, 6, 11, 6], "study_interval": [2022] * 4,

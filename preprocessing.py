@@ -1,8 +1,9 @@
 """Reproducible, descriptive audit of the mcPHASES 2022 exports.
 
 Run from the thesis workspace: python code/preprocessing.py
-Requires pandas and NumPy. No model features, imputation or unit conversions
-are produced. Supplied phase labels are not independently validated outcomes.
+Requires pandas and NumPy. Confirmed glucose units are standardised to mmol/L;
+no model features or imputation are produced. Supplied phase labels are not
+independently validated outcomes.
 """
 
 from __future__ import annotations
@@ -23,9 +24,15 @@ PARTICIPANT_KEY = KEY[:2]
 PHASES = {"menstrual", "follicular", "fertility", "ovulation", "luteal"}
 SECONDS_PER_DAY = 86400
 CGM_INTERVAL_SECONDS = 300
-UNRESOLVED_GLUCOSE_IDS = (6, 11)
+UNRESOLVED_GLUCOSE_IDS = ()
+MG_DL_GLUCOSE_IDS = (6, 11)
+MG_DL_TO_MMOL_L = 0.0555
 SOURCE_REVIEW_DATE = "2026-10-12"
 EVIDENCE_SOURCES = {
+    "glucose_conversion": {
+        "url": "https://www.niddk.nih.gov/-/media/Files/Strategic-Plans/Diabetes-in-America-3rd-Edition/DIA_Conversions.pdf",
+        "finding": "The glucose conversion table specifies mg/dL multiplied by 0.0555 to obtain mmol/L.",
+    },
     "dataset": {
         "url": "https://physionet.org/content/mcphases/1.0.0/",
         "finding": "Device exports are largely uncleaned; dates use relative study days. "
@@ -229,6 +236,8 @@ def audit_table(raw_dir: Path, name: str, spec: dict) -> tuple[pd.DataFrame, dic
     data["audit_conflicting_key"] = data.duplicated(measurement_key(spec), keep=False)
     data = add_timing(data, spec)
     data, checks = add_numeric_checks(data, spec)
+    if name == "glucose":
+        data = standardise_glucose_units(data)
     data["audit_structurally_usable"] = ~data[[
         "audit_conflicting_key", "audit_invalid_time", "audit_invalid_value",
     ]].any(axis=1)
@@ -244,6 +253,32 @@ def audit_table(raw_dir: Path, name: str, spec: dict) -> tuple[pd.DataFrame, dic
     if "coverage" in data:
         summary["hrv_coverage_above_one_rows"] = int(pd.to_numeric(data["coverage"], errors="coerce").gt(1).sum())
     return data.sort_values(measurement_key(spec)).reset_index(drop=True), summary, checks
+
+
+def glucose_unit_policy() -> dict:
+    return {"mg_dl_participants": list(MG_DL_GLUCOSE_IDS), "target_unit": "mmol/L",
+            "mg_dl_to_mmol_l_multiplier": MG_DL_TO_MMOL_L,
+            "confirmation_source": "User confirmed mg/dL for participants 6 and 11 in this project conversation",
+            "confirmed_on": SOURCE_REVIEW_DATE,
+            "provider_confirmation_independently_verified": False,
+            "other_participants": "mmol/L provisionally follows the export README",
+            "source_values_preserved_in": "glucose_source_value"}
+
+
+def standardise_glucose_units(data: pd.DataFrame) -> pd.DataFrame:
+    """Apply the confirmed participant mapping once, after checking source values."""
+    if "glucose_source_value" in data:
+        raise ValueError("Glucose units have already been standardised; read the raw export")
+    result = data.copy()
+    converted = result["id"].isin(MG_DL_GLUCOSE_IDS) & result["study_interval"].eq(STUDY_INTERVAL)
+    result["glucose_source_value"] = result["glucose_value"]
+    result["glucose_source_unit"] = np.where(converted, "mg/dL", "mmol/L")
+    result["glucose_unit"] = "mmol/L"
+    result["glucose_unit_converted"] = converted
+    result["glucose_conversion_factor"] = np.where(converted, MG_DL_TO_MMOL_L, 1.0)
+    result["glucose_value"] = pd.to_numeric(result["glucose_source_value"], errors="coerce")
+    result["glucose_value"] *= result["glucose_conversion_factor"]
+    return result
 
 
 def create_daily_grid(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -576,7 +611,8 @@ def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame) -> 
              "HRV intervals must fit entirely inside that sleep (start included, end included);",
              "five-minute interval completion is checked, including midnight crossings.",
              "The existing CGM quality thresholds and HRV coverage/count rules are retained.",
-             "IDs 6 and 11 remain excluded from every primary input comparison.", "",
+             "IDs 6 and 11 have user-confirmed mg/dL values, standardised to mmol/L; they pass the unit gate.",
+             "Their inclusion still requires the same signal, timing and history rules as every participant.", "",
              "Each prediction requires usable aligned inputs on t-2, t-1 and t, with no missing days.",
              "This uses glucose/RHR source dates t-3 through t-1 and sleep end dates t-2 through t.",
              "Only the target day's recognised phase label is required; historical labels are not inputs.",
@@ -662,7 +698,7 @@ def rule_effect(daily: pd.DataFrame, rule: str, before: pd.Series, after: pd.Ser
 def quality_rule_effects(daily: pd.DataFrame, settings: dict) -> pd.DataFrame:
     labelled = daily["phase"].notna()
     cases = [
-        ("exclude_unconfirmed_glucose_units_from_all_modalities", labelled, labelled & daily["quality_units_accepted"]),
+        ("standardised_glucose_units_from_confirmed_mapping", labelled, labelled & daily["quality_units_accepted"]),
         ("resting_heart_rate_structural_checks", daily["resting_heart_rate_records"].gt(0), daily["quality_rhr"]),
         ("hrv_minimum_coverage_and_window_count", daily["heart_rate_variability_details_available_records"].gt(0), daily["quality_hrv"]),
         ("hrv_optional_upper_bound_one_sensitivity", daily["quality_hrv"], daily["hrv_bounded_quality_windows"].ge(settings["min_hrv_windows"])),
@@ -721,11 +757,19 @@ def unit_evidence(data: pd.DataFrame) -> pd.DataFrame:
     for key, group in data.groupby(PARTICIPANT_KEY):
         values = pd.to_numeric(group["glucose_value"], errors="coerce")
         values = values.loc[values.notna() & np.isfinite(values) & values.gt(0)]
+        source = pd.to_numeric(group["glucose_source_value"], errors="coerce")
+        source = source.loc[source.notna() & np.isfinite(source) & source.gt(0)]
         stats = {"minimum": values.min(), "q25": values.quantile(0.25),
                  "median": values.median() if len(values) else np.nan,
                  "q75": values.quantile(0.75), "maximum": values.max()}
         rows.append(dict(zip(PARTICIPANT_KEY, key)) | stats | {
             "numeric_records": len(values), "integer_value_fraction": float(values.mod(1).eq(0).mean()) if len(values) else np.nan,
+            "source_minimum": source.min(), "source_median": source.median() if len(source) else np.nan,
+            "source_maximum": source.max(),
+            "source_integer_value_fraction": float(source.mod(1).eq(0).mean()) if len(source) else np.nan,
+            "source_unit": group["glucose_source_unit"].iloc[0], "standardised_unit": "mmol/L",
+            "conversion_factor": group["glucose_conversion_factor"].iloc[0],
+            "converted_records": int(group["glucose_unit_converted"].sum()),
             "units_unconfirmed": key[0] in UNRESOLVED_GLUCOSE_IDS,
             "primary_participant_exclusion": key[0] in UNRESOLVED_GLUCOSE_IDS,
         })
@@ -740,12 +784,13 @@ def decision_log_text(effects: pd.DataFrame, attrition: pd.DataFrame,
              "prior-day CGM lag, or trailing histories. They must not be used as the final modelling cohort.",
              "A transition counts as available here when its reference day passes the rule; neighbouring",
              "days and detection performance are not assessed. Independent effects are not additive.", "",
-             "1. **Glucose units:** README.txt states mmol/L with a documentation caveat. The public release",
-             "   and original paper do not confirm units for IDs 6 and 11. Retain raw values without conversion;",
-             "   exclude these participants from all three primary input sets until independently resolved.",
+             "1. **Glucose units:** the user confirmed mg/dL for IDs 6 and 11 on 2026-10-12.",
+             "   Standardise these participants to mmol/L by multiplying by 0.0555 in processed data only.",
+             "   Preserve source values, source units, conversion flags and factors; raw exports are unchanged.",
+             "   Remove their previous unit-based exclusion from all three primary input sets.",
              "   Other participants provisionally follow the documented units, without individual unit validation.",
-             "   The unit-evidence table shows distributions; magnitude and integer precision do not prove units.",
-             "   Reinclusion requires a documented source correction and regeneration of every comparison cohort.",
+             "   The mapping follows the user's confirmation, not magnitude alone; provider confirmation was not independently verified.",
+             "   The unit-evidence table reports both source-scale and standardised distributions.",
              "2. **Resting heart rate:** exact duplicates are removed and conflicting daily keys excluded.",
              f"   Retained 2022 RHR records have {evidence['rhr_conflicting_rows']} conflicting-key rows; no aggregation is needed when this is zero.",
              "   Equal values on different days",
@@ -787,7 +832,7 @@ def decision_log_text(effects: pd.DataFrame, attrition: pd.DataFrame,
         lines.append(f"- {name}: {int(group['cross_midnight'].sum())} / {len(multiple)}.")
     lines += ["", "Sources reviewed " + SOURCE_REVIEW_DATE + ": raw/README.txt and"]
     lines += [f"- [{name}]({source['url']})" for name, source in EVIDENCE_SOURCES.items()]
-    lines += ["", "Remaining: independent unit confirmation, cause of HRV overshoot, fixed morning cutoff,",
+    lines += ["", "Remaining: cause of HRV overshoot, fixed morning cutoff,",
               "clock/sync availability assumptions, trailing-history rules, and the final common cohort."]
     return "\n".join(lines) + "\n"
 
@@ -812,7 +857,7 @@ def save_eligibility_review(tables: dict, daily: pd.DataFrame, args: argparse.Na
         args.report_dir / "session_end_time_sensitivity.csv", index=False)
     provenance = {"reviewed_on": SOURCE_REVIEW_DATE, "sources": EVIDENCE_SOURCES,
                   "local_readme_sha256": file_sha256(args.raw_dir / "README.txt") if (args.raw_dir / "README.txt").exists() else None,
-                  "settings": settings, "model_ready": False}
+                  "settings": settings, "glucose_unit_policy": glucose_unit_policy(), "model_ready": False}
     (args.report_dir / "decision_sources.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     coverage = pd.to_numeric(tables["heart_rate_variability_details"]["coverage"], errors="coerce")
     evidence = {"rhr_conflicting_rows": int(tables["resting_heart_rate"]["audit_conflicting_key"].sum()),
@@ -920,7 +965,7 @@ missing. Available-record counts require the primary value and no structural
 flags across the audited numeric fields. These are conservative audit counts,
 not final physiological validity or modelling eligibility.
 Unknown phase strings are excluded from reference outcomes and listed separately.
-No measurement values are averaged, converted or imputed.
+No measurement values are averaged or imputed. Confirmed glucose units are standardised.
 
 ## Coverage and units
 
@@ -934,8 +979,11 @@ but retained pending verification of its definition.
 
 Units follow raw/README.txt provisionally: glucose mmol/L, resting HR bpm,
 skin temperature degrees Celsius. HRV units and device coverage semantics
-need verification. Glucose units for participants 6 and 11 remain unresolved;
-their distributions are reported without conversion. Missing 2022 PdG values
+need verification. On 2026-10-12 the user confirmed mg/dL for participants 6 and 11.
+Their processed glucose_value is multiplied by 0.0555 to obtain mmol/L; source values,
+units, factors and conversion flags are preserved. This confirmation was not
+independently verified with the provider. Other participants follow the documented units.
+Both source and standardised distributions are reported. Missing 2022 PdG values
 must not be imputed as independent confirmation of phase labels.
 
 ## Reference labels and next steps
@@ -947,7 +995,7 @@ non-luteal label on the immediately preceding calendar day. Initial luteal
 observations and entries after missing labels are uncertain.
 Supplied labels are not independently hormone-validated ground truth.
 
-Before modelling, resolve units and duplicate semantics, verify timestamp and
+Before modelling, verify timestamp and
 availability conventions, fix a morning cutoff, align prior-day CGM and eligible
 overnight wearable measurements, and define shared coverage/history rules.
 No clinical or causal conclusions can be drawn from this audit.
@@ -1017,6 +1065,7 @@ def run_audit(args: argparse.Namespace) -> pd.DataFrame:
               "python_version": platform.python_version(), "pandas_version": pd.__version__,
               "numpy_version": np.__version__, "source_sha256": hashes,
               "script_sha256": file_sha256(Path(__file__)),
+              "glucose_unit_policy": glucose_unit_policy(),
               "cgm_nominal_interval_seconds": CGM_INTERVAL_SECONDS,
               "prediction_cutoff": "10:00:00" if getattr(args, "temporal_review", False) else None,
               "model_ready": False,

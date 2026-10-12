@@ -73,7 +73,11 @@ def write_temporal_exports(raw_dir):
                     item["coverage"] = 1.005
             records.append(item)
         first = pd.concat(records, ignore_index=True)
-        pd.concat([first, first.assign(id=6), first.assign(study_interval=2024)]).to_csv(path, index=False)
+        second, third = first.assign(id=6), first.assign(id=11)
+        if path.stem == "glucose":
+            second["glucose_value"] /= preprocessing.MG_DL_TO_MMOL_L
+            third["glucose_value"] /= preprocessing.MG_DL_TO_MMOL_L
+        pd.concat([first, second, third, first.assign(study_interval=2024)]).to_csv(path, index=False)
 
 
 class PreprocessingTests(unittest.TestCase):
@@ -295,7 +299,7 @@ class PreprocessingTests(unittest.TestCase):
             self.assertEqual(summary["exact_duplicates_removed"], 0)
             self.assertEqual(summary["conflicting_key_rows"], 0)
 
-    def test_eligibility_review_end_to_end_and_unit_exclusion(self):
+    def test_eligibility_review_end_to_end_and_confirmed_unit_inclusion(self):
         with tempfile.TemporaryDirectory(dir=MODULE_PATH.parent / "tests") as directory:
             root = Path(directory)
             raw_dir = root / "raw"
@@ -314,6 +318,8 @@ class PreprocessingTests(unittest.TestCase):
                     original["timestamp"] = [f"01:{minute:02d}:00" for minute in range(0, 30, 5)] * (len(original) // 6)
                     original["coverage"] = 1.005
                 second = original.assign(id=6)
+                if path.stem == "glucose":
+                    second["glucose_value"] /= preprocessing.MG_DL_TO_MMOL_L
                 pd.concat([original, second]).to_csv(path, index=False)
             args = argparse.Namespace(raw_dir=raw_dir, processed_dir=root / "processed",
                                       report_dir=root / "reports", eligibility_review=True)
@@ -321,8 +327,8 @@ class PreprocessingTests(unittest.TestCase):
                 preprocessing.run_audit(args)
             daily = pd.read_csv(args.processed_dir / "quality_review_daily_2022.csv")
             self.assertTrue(daily.loc[daily.id.eq(1), "quality_units_accepted"].all())
-            self.assertFalse(daily.loc[daily.id.eq(6), "quality_units_accepted"].any())
-            self.assertFalse(daily.loc[daily.id.eq(6), "same_day_quality_overlap"].any())
+            self.assertTrue(daily.loc[daily.id.eq(6), "quality_units_accepted"].all())
+            self.assertTrue(daily.loc[daily.id.eq(6), "same_day_quality_overlap"].all())
             self.assertTrue(daily.loc[daily.id.eq(1), "same_day_quality_overlap"].all())
             self.assertTrue(daily.quality_glucose.all())
             self.assertTrue(daily.quality_hrv.all())
@@ -330,9 +336,11 @@ class PreprocessingTests(unittest.TestCase):
             self.assertFalse(daily.duplicated(preprocessing.KEY).any())
             transitions = pd.read_csv(args.processed_dir / "phase_transition_review_2022.csv")
             self.assertTrue(transitions.transition_status.eq("exact").all())
-            self.assertEqual(int((daily.same_day_quality_overlap & daily.exact_luteal_onset.eq(1)).sum()), 1)
+            self.assertEqual(int((daily.same_day_quality_overlap & daily.exact_luteal_onset.eq(1)).sum()), 2)
             log = (args.report_dir / "decision_log.md").read_text(encoding="utf-8")
             self.assertIn("all three primary input sets", log)
+            glucose = pd.read_csv(args.processed_dir / "glucose_2022_audited.csv")
+            self.assertTrue(np.allclose(glucose.glucose_value, 1.0))
             self.assertIn("not be used as the final modelling cohort", log)
 
 
@@ -392,7 +400,7 @@ class PreprocessingTests(unittest.TestCase):
         self.assertEqual(result.prior_day_glucose_unique_samples.iloc[1:].tolist(), [10, 288])
         self.assertFalse(result.eligible_prediction.any())
 
-    def test_temporal_review_reproducibility_exclusion_and_history(self):
+    def test_temporal_review_reproducibility_confirmed_units_and_history(self):
         with tempfile.TemporaryDirectory(dir=MODULE_PATH.parent / "tests") as directory:
             root = Path(directory)
             raw_dir = root / "raw"
@@ -409,10 +417,10 @@ class PreprocessingTests(unittest.TestCase):
                 eligible = pd.read_csv(args.processed_dir / "eligible_observations_10_2022.csv")
                 self.assertTrue(daily.study_interval.eq(2022).all())
                 self.assertFalse(daily.duplicated(preprocessing.KEY).any())
-                self.assertEqual(eligible.id.tolist(), [1, 1, 1])
-                self.assertEqual(eligible.day_in_study.tolist(), [4, 5, 6])
+                self.assertEqual(eligible.id.tolist(), [1] * 3 + [6] * 3 + [11] * 3)
+                self.assertEqual(eligible.day_in_study.tolist(), [4, 5, 6] * 3)
                 self.assertTrue(eligible.history_usable_days.eq(3).all())
-                self.assertEqual(int(eligible.exact_luteal_onset.eq(1).sum()), 1)
+                self.assertEqual(int(eligible.exact_luteal_onset.eq(1).sum()), 3)
                 early = pd.read_csv(args.processed_dir / "eligible_observations_08_2022.csv")
                 self.assertTrue(early.empty)
                 log = (args.report_dir / "temporal_protocol.md").read_text(encoding="utf-8")
@@ -426,6 +434,39 @@ class PreprocessingTests(unittest.TestCase):
                              (runs[1].report_dir / "temporal_protocol.md").read_bytes())
             for path in raw_dir.glob("*.csv"):
                 self.assertEqual(preprocessing.file_sha256(path), hashes[path.name])
+
+
+    def test_glucose_conversion_preserves_source_values_and_rejects_double_conversion(self):
+        data = pd.DataFrame({"id": [1, 6, 11, 6], "study_interval": [2022] * 4,
+                             "glucose_value": [5.0, 100.0, 118.0, np.nan]})
+        result = preprocessing.standardise_glucose_units(data)
+        self.assertTrue(np.allclose(result.glucose_value.iloc[:3], [5.0, 5.55, 6.549]))
+        self.assertTrue(result.glucose_source_value.equals(data.glucose_value))
+        self.assertEqual(result.glucose_source_unit.tolist(), ["mmol/L", "mg/dL", "mg/dL", "mg/dL"])
+        self.assertEqual(result.glucose_unit_converted.tolist(), [False, True, True, True])
+        self.assertTrue(result.glucose_unit.eq("mmol/L").all())
+        self.assertTrue(pd.isna(result.glucose_value.iloc[3]))
+        self.assertEqual(data.glucose_value.iloc[1], 100)
+        with self.assertRaises(ValueError):
+            preprocessing.standardise_glucose_units(result)
+
+    def test_conversion_preserves_invalid_flags_and_filters_2024_first(self):
+        with tempfile.TemporaryDirectory(dir=MODULE_PATH.parent / "tests") as directory:
+            path = Path(directory) / "glucose.csv"
+            path.write_text("id,study_interval,day_in_study,timestamp,glucose_value\n"
+                            "6,2022,1,00:00:00,100\n6,2022,1,00:05:00,bad\n"
+                            "11,2022,1,00:00:00,0\n11,2022,1,00:05:00,-18\n"
+                            "6,2024,1,00:00:00,100\n", encoding="utf-8")
+            before = path.read_bytes()
+            data, summary, _ = preprocessing.audit_table(
+                Path(directory), "glucose", preprocessing.TABLE_SPECS["glucose"])
+            self.assertEqual(summary["excluded_other_interval_rows"], 1)
+            self.assertEqual(summary["invalid_value_rows"], 3)
+            self.assertEqual(int(data.audit_structurally_usable.sum()), 1)
+            self.assertEqual(data.glucose_value.iloc[0], 5.55)
+            self.assertEqual(data.glucose_source_value.iloc[1], "bad")
+            self.assertTrue(data.study_interval.eq(2022).all())
+            self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == "__main__":

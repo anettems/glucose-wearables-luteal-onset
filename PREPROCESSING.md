@@ -26,7 +26,8 @@ computed temperature and sleep. Other exports are inventoried only.
   missingness, flagged source rows, numeric checks, participant coverage,
   value distributions, phase counts, unknown phase records and a run manifest.
 
-Raw values are preserved after exact duplicate removal. Additional `audit_`
+Source values are preserved after exact duplicate removal. Glucose is
+standardised to mmol/L as described below. Additional `audit_`
 columns describe structural problems and timing. Conflicting measurement keys
 are retained and flagged, not averaged. A session's daily audit key is its end
 day; both original start and end fields are preserved. Timing is represented
@@ -49,8 +50,22 @@ indicators, not a final common modelling cohort or verified biological validity.
 Glucose coverage uses the union of nominal forward five-minute intervals,
 clipped at midnight. Longest uncovered time includes boundary gaps. This is a
 documented sampling assumption, not proof that every covered second was valid.
-Glucose distributions include flagged records for transparent inspection; no
-unit conversions are made. Participant 6 and 11 unit questions remain open.
+Glucose distributions include flagged records for transparent inspection.
+`glucose_value` is standardised to mmol/L. On 12 October 2026 the user confirmed
+that participants 6 and 11 have mg/dL source values. These participants are
+converted using `mmol/L = mg/dL * 0.0555`, following the
+[NIDDK conversion table](https://www.niddk.nih.gov/-/media/Files/Strategic-Plans/Diabetes-in-America-3rd-Edition/DIA_Conversions.pdf).
+Other participants provisionally retain the README's mmol/L units.
+
+The audited glucose table retains `glucose_source_value`, `glucose_source_unit`,
+`glucose_unit`, `glucose_conversion_factor`, and `glucose_unit_converted`.
+The manifest records the mapping, factor, confirmation date and provenance.
+The confirmation came from the user; it was not independently checked with the
+provider. Conversion is based on this explicit confirmation, never inferred
+from value magnitude. Source numeric checks and duplicate detection precede
+conversion, so malformed, non-positive and conflicting records remain flagged.
+Missing values remain missing, and attempting to convert an already
+standardised table raises an error. Raw exports are never changed.
 
 ## Repeating a run
 
@@ -67,9 +82,9 @@ naturally records different destination paths on a repeat run. Source hashes
 are verified again before writing. Audited source exports and generated data
 are not intended to be committed to Git as part of the implementation.
 
-Before modelling, fix the morning cutoff, measurement-availability assumptions,
-duplicate resolution, units, minimum coverage, history requirements and common
-eligibility rules. This audit does not establish independent hormone validation
+The optional reviews below implement quality and temporal rules. Remaining
+measurement-availability assumptions must be considered before modelling.
+This audit does not establish independent hormone validation
 or prospective prediction performance.
 
 ## Eligibility decision review
@@ -88,11 +103,11 @@ documented evidence locally; it does not fetch web pages on each run.
 
 Default quality-review rules are:
 
-- Exclude IDs 6 and 11 from every primary input comparison until their glucose
-  units are independently confirmed. Raw values remain unchanged. A difference
-  in value scale or integer precision does not establish a unit conversion.
-  Other IDs provisionally follow the export documentation. Reinstatement
-  requires documented correction and regeneration of all paired cohorts.
+- Standardise the user-confirmed mg/dL source values for IDs 6 and 11 to mmol/L.
+  Remove their former unit-based exclusion from every primary input comparison.
+  They must still pass the same signal, timing and history checks as everyone
+  else. Other IDs provisionally follow the export documentation. The unit-evidence
+  table reports both original and standardised distributions.
 - Resting heart rate requires a positive finite value and an unambiguous daily
   key. Equal values on different study days are retained. No averaging rule is
   introduced for 2022 records.
@@ -172,7 +187,8 @@ For each prediction day `t`:
   are inclusive, and each interval ends five minutes after its timestamp.
   At least six usable intervals with coverage at least 0.8 are required per
   selected sleep. Source day keys are preserved in the alignment diagnostics.
-- IDs 6 and 11 remain excluded consistently from every primary input set.
+- IDs 6 and 11 are now eligible for inclusion after unit standardisation,
+  subject to the same remaining requirements as every primary input set.
 
 Exactly **three usable consecutive calendar days** of aligned inputs are
 required: `t-2`, `t-1`, and `t`. Consequently, the glucose/RHR source dates
@@ -203,3 +219,13 @@ cutoffs must account for the changed cohort or restrict to common keys.
 The script does not construct model features or participant splits, and
 `model_ready` remains false. Feature construction, participant-disjoint splits
 and onset-scoring rules remain subsequent work.
+
+The first run after confirmed unit standardisation is saved separately:
+
+```powershell
+& C:/Users/anett/miniconda3/python.exe code/preprocessing.py --temporal-review --processed-dir code/data/processed/temporal_units_2022 --report-dir results/temporal_units_2022
+```
+
+Earlier generated folders retain the historical pre-confirmation audit and
+must not be treated as current cohort outputs. Regenerate in fresh destinations
+to reproduce the corrected protocol; never manually edit old generated files.

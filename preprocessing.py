@@ -1,4 +1,4 @@
-"""Reproducible, descriptive audit of the mcPHASES 2022 exports.
+"""Audit of the mcPHASES 2022 exports.
 
 Run from the thesis workspace: python code/preprocessing.py
 Requires pandas and NumPy. Confirmed glucose units are standardised to mmol/L;

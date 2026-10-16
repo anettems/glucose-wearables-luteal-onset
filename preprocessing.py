@@ -24,7 +24,8 @@ PARTICIPANT_KEY = KEY[:2]
 PHASES = {"menstrual", "follicular", "fertility", "ovulation", "luteal"}
 SECONDS_PER_DAY = 86400
 CGM_INTERVAL_SECONDS = 300
-PRIMARY_CUTOFF_HOUR = 12
+PRIMARY_CUTOFF_HOUR = 14
+MIN_WEARABLE_SIGNALS = 2
 UNRESOLVED_GLUCOSE_IDS = ()
 MG_DL_GLUCOSE_IDS = (6, 11)
 MG_DL_TO_MMOL_L = 0.0555
@@ -87,26 +88,27 @@ TABLE_SPECS = {
 }
 
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments(argv=None, *, prepare=False) -> argparse.Namespace:
     workspace = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-dir", type=Path, default=workspace / "code/data/raw")
     parser.add_argument(
         "--processed-dir", type=Path,
-        default=workspace / "code/data/processed/audit_2022",
+        default=workspace / ("code/data/processed/primary_1400_2022" if prepare else "code/data/processed/audit_2022"),
     )
     parser.add_argument(
-        "--report-dir", type=Path, default=workspace / "results/preprocessing_2022",
+        "--report-dir", type=Path,
+        default=workspace / ("results/primary_1400_2022" if prepare else "results/preprocessing_2022"),
     )
     parser.add_argument("--eligibility-review", action="store_true",
                         help="Also generate quality-rule evidence, effects and a decision log")
     parser.add_argument("--temporal-review", action="store_true",
-                        help="Also align morning inputs and require three usable calendar days")
+                        help="Align previous-day glucose and at least two wearables by 14:00")
     parser.add_argument("--min-glucose-coverage", type=float, default=0.70)
     parser.add_argument("--max-glucose-gap-hours", type=float, default=4.0)
     parser.add_argument("--min-hrv-coverage", type=float, default=0.80)
     parser.add_argument("--min-hrv-windows", type=int, default=6)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def validate_output_paths(raw_dir: Path, destinations: list[Path]) -> None:
@@ -543,7 +545,9 @@ def selected_day_flag(data: pd.DataFrame, column: str) -> pd.DataFrame:
 
 def temporal_settings() -> dict:
     return {"prediction_cutoff": f"{PRIMARY_CUTOFF_HOUR:02d}:00:00",
-            "history_calendar_days": 3, "required_history_days": 3,
+            "history_calendar_days": 1, "required_history_days": 1,
+            "minimum_wearable_signals": MIN_WEARABLE_SIGNALS,
+            "missing_wearable_policy": "Training-only feature median after participant splitting",
             "glucose_lag_days": 1, "sleeping_heart_rate_lag_days": 0,
             "heart_rate_source": "sleep_score.csv.resting_heart_rate",
             "heart_rate_unit": "bpm",
@@ -598,9 +602,10 @@ def lag_daily_columns(daily: pd.DataFrame, columns: dict) -> pd.DataFrame:
 
 
 def add_calendar_history(daily: pd.DataFrame) -> pd.DataFrame:
+    """Legacy three-day extension helper; not used by the primary protocol."""
     result = daily.copy()
     result["history_usable_days"] = 0
-    for lag in range(temporal_settings()["history_calendar_days"]):
+    for lag in range(3):
         previous = daily[KEY + ["aligned_inputs_available"]].copy()
         previous["day_in_study"] += lag
         previous = previous.rename(columns={"aligned_inputs_available": "_history_usable"})
@@ -613,7 +618,7 @@ def add_calendar_history(daily: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def aligned_morning_days(quality: pd.DataFrame, sleep: pd.DataFrame,
+def aligned_prediction_days(quality: pd.DataFrame, sleep: pd.DataFrame,
                          temperature: pd.DataFrame, intervals: pd.DataFrame,
                          settings: dict, cutoff_hour: int) -> pd.DataFrame:
     columns = KEY + ["phase", "luteal_status", "exact_luteal_onset",
@@ -643,94 +648,58 @@ def aligned_morning_days(quality: pd.DataFrame, sleep: pd.DataFrame,
     flags = ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep", "aligned_sleeping_hr",
              "aligned_hrv", "aligned_temperature"]
     result[flags] = result[flags].fillna(False).astype(bool)
-    result["aligned_inputs_available"] = result[flags].all(axis=1)
-    return add_calendar_history(result)
+    return apply_prediction_requirements(result)
+
+
+def apply_prediction_requirements(daily: pd.DataFrame) -> pd.DataFrame:
+    """Keep one-day inputs; a missing wearable does not invalidate the other two."""
+    result = daily.copy()
+    wearables = ["aligned_sleeping_hr", "aligned_hrv", "aligned_temperature"]
+    result["valid_wearable_count"] = result[wearables].sum(axis=1)
+    result["sufficient_wearables"] = result["valid_wearable_count"].ge(MIN_WEARABLE_SIGNALS)
+    required = ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep", "sufficient_wearables"]
+    result["aligned_inputs_available"] = result[required].all(axis=1)
+    result["eligible_prediction"] = result["aligned_inputs_available"] & result["phase"].notna()
+    return result
 
 
 def temporal_attrition(daily: pd.DataFrame, cutoff_hour: int) -> pd.DataFrame:
     mask = daily["phase"].notna()
     rows = [{"stage": "recognised_labels", **availability_counts(daily, mask)}]
-    for column in ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep", "aligned_sleeping_hr",
-                   "aligned_hrv", "aligned_temperature", "eligible_prediction"]:
+    for column in ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep", "sufficient_wearables"]:
         mask &= daily[column]
         rows.append({"stage": column, **availability_counts(daily, mask)})
     return pd.DataFrame(rows).assign(cutoff_hour=cutoff_hour)
 
 
-def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame) -> str:
-    lines = ["# Fixed-cutoff alignment and three-day eligibility: mcPHASES 2022", "",
-             f"Primary cutoff: {PRIMARY_CUTOFF_HOUR:02d}:00. One three-calendar-day history is used.",
-             "These are analyst-selected protocol choices, not optimised or clinically validated settings. Only noon is evaluated.",
-             "Noon was selected before modelling to admit more completed main-sleep sessions; no current-day daytime inputs are added.",
-             "Sleeping HR replaces the daily RHR requirement and comes from sleep_score.csv.resting_heart_rate (bpm).", "",
-             "For prediction day t, glucose uses day t-1; sleeping HR uses the selected main sleep ending on t.",
-             "Sleep and matching temperature use the selected main sleep ending on day t by cutoff.",
-             "Sleep-score HR requires an exact end-day/end-time match to one selected main sleep; naps and unmatched or ambiguous scores are excluded.",
-             "The supplied sleeping HR aggregation is unspecified; the score timestamp is not assumed to be a publication time.",
-             "HRV intervals must fit entirely inside that sleep (start included, end included);",
-             "five-minute interval completion is checked, including midnight crossings.",
-             "The existing CGM quality thresholds and HRV coverage/count rules are retained.",
-             "IDs 6 and 11 have user-confirmed mg/dL values, standardised to mmol/L; they pass the unit gate.",
-             "Their inclusion still requires the same signal, timing and history rules as every participant.", "",
-             "Each prediction requires usable aligned inputs on t-2, t-1 and t, with no missing days.",
-             "This uses glucose source dates t-3 through t-1 and sleeping HR/HRV/temperature sleep end dates t-2 through t.",
-             "Only the target day's recognised phase label is required; historical labels are not inputs.",
-             "No imputation, full-cycle normalisation or future data is used. No seven-day history is required.", "",
-             "## Cumulative eligibility", "",
-             "| Cutoff | Requirement added | Participants | Labelled days | Exact transition dates |",
-             "|---|---|---:|---:|---:|"]
+def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame, settings: dict) -> str:
+    lines = ["# Primary analysis: mcPHASES 2022", "",
+             "Primary cutoff: 14:00. Use one day's inputs; no multi-day trends.",
+             f"CGM: previous calendar day, >={settings['min_glucose_coverage']:.0%} coverage and no uncovered gap >{settings['max_glucose_gap_hours']:g} hours.",
+             "Wearables: selected main sleep ending on the prediction day by 14:00 (inclusive).",
+             "At least two of sleeping HR, HRV and skin temperature must pass their quality rules.",
+             "Sleeping HR: positive sleep-score HR with an exact, unambiguous main-sleep end match.",
+             f"HRV: >={settings['min_hrv_windows']} valid five-minute intervals wholly inside that sleep, each with coverage >={settings['min_hrv_coverage']:g}.",
+             "Temperature: valid SKIN value, positive integer sample count, exact selected-sleep match.",
+             "Only the target day's phase label is needed for classification; labels are not predictors.",
+             "Missing wearable values stay blank in shared datasets. Fit replacement medians on each",
+             "training split only, then apply unchanged to validation/testing. Never impute glucose gaps.",
+             "All three input sets use identical observation keys and participant splits.", "",
+             "## Cumulative data reduction", "",
+             "| Requirement added | Participants | Days with phase information | Luteal days | Luteal starts |",
+             "|---|---:|---:|---:|---:|"]
     for row in attrition.itertuples():
-        lines.append(f"| {row.cutoff_hour:02d}:00 | {row.stage} | {row.participants} | {row.labelled_days} | {row.exact_transitions} |")
-    lines += ["", f"HRV interval diagnostics: {len(intervals)} retained intervals; "
-              f"{int(intervals['matched_main_sleep'].sum())} fit a selected main sleep; "
-              f"{int(intervals['usable_in_main_sleep'].sum())} also pass HRV quality checks.", "",
-              "## Assumptions and limitations", "",
-              "Export clocks are assumed to be mutually aligned participant-local clocks. Timezones and",
-              "daylight-saving changes are not verified; no timezone conversion is applied.",
-              "Completed prior-day summaries and completed sleep measurements are assumed available by cutoff.",
-              "Sync, publication and revision times are unavailable/unverified. A sleep end before cutoff",
-              "does not prove actual availability; no arbitrary processing buffer is treated as proof.",
-              "This is a retrospective timing-constrained cohort under stated availability assumptions,",
-              "not demonstrated real-time deployment. No model-ready feature matrix or data splits are produced.",
-              "Transition counts only require an eligible reference date. Event matching, neighbouring",
-              "evaluation days and onset scoring remain to be specified before model evaluation.",
-              "All three modalities use identical eligible observation keys at the single noon cutoff."]
+        lines.append(f"| {row.stage} | {row.participants} | {row.labelled_days} | {row.luteal_days} | {row.exact_transitions} |")
+    lines += ["", f"HRV intervals passing sleep matching and quality: {int(intervals['usable_in_main_sleep'].sum())}.",
+              "", "## Interpretation", "",
+              "This is exploratory analysis, not demonstrated real-time deployment. The thresholds are",
+              "analyst-selected quality rules, not established clinical limits. 14:00 admits later-ending sleeps.",
+              "Export clocks are assumed aligned participant-local clocks; upload/sync times are unverified.",
+              "Starts are adjacent observed non-luteal/luteal dates, not confirmed biological onsets or detections.",
+              "Participant splits and onset-alert evaluation rules remain to be specified.",
+              "The descriptive audit and same-day quality reports are diagnostics, not the primary cohort.",
+              "Historical noon/three-day outputs are superseded and must not be mixed with this run."]
     return "\n".join(lines) + "\n"
-
-
-def save_hr_source_comparison(aligned: pd.DataFrame, quality: pd.DataFrame,
-                              args: argparse.Namespace) -> None:
-    """Isolate the HR source change on the same calendar and unchanged other rules."""
-    legacy = join_daily(aligned, lag_daily_columns(quality, {"quality_rhr": "_legacy_rhr"}))
-    flags = ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep",
-             "aligned_hrv", "aligned_temperature"]
-    legacy["aligned_inputs_available"] = legacy[flags].all(axis=1) & legacy["_legacy_rhr"].fillna(False)
-    legacy = add_calendar_history(legacy)
-    rows = [{"hr_source": name, **availability_counts(data, data["eligible_prediction"])}
-            for name, data in [("legacy_prior_day_rhr", legacy), ("same_sleep_score_hr", aligned)]]
-    pd.DataFrame(rows).to_csv(args.report_dir / "hr_source_cohort_comparison.csv", index=False)
-    changes = aligned[KEY + ["eligible_prediction"]].rename(
-        columns={"eligible_prediction": "eligible_sleeping_hr"})
-    changes["eligible_legacy_rhr"] = legacy["eligible_prediction"]
-    changes.loc[changes.eligible_sleeping_hr.ne(changes.eligible_legacy_rhr)].to_csv(
-        args.report_dir / "hr_source_eligibility_changes.csv", index=False)
-    gained = int((changes.eligible_sleeping_hr & ~changes.eligible_legacy_rhr).sum())
-    lost = int((~changes.eligible_sleeping_hr & changes.eligible_legacy_rhr).sum())
-    lines = ["# Sleeping HR replacement decision", "",
-             "Use Fitbit-reported sleep_score.csv.resting_heart_rate in bpm instead of daily RHR.",
-             "Require finite positive HR and an exact unambiguous selected-main-sleep end match.",
-             "Exclude non-main sessions, unmatched ends and conflicting keys; do not average or guess matches.",
-             "Sleeping HR/HRV/temperature use the same main sleep ending on t by noon; CGM uses t-1.",
-             "All required signals must pass on t-2, t-1 and t. Daily RHR is descriptive only.", "",
-             "| HR source | Participants | Labelled days | Exact transition dates |",
-             "|---|---:|---:|---:|"]
-    lines += [f"| {row['hr_source']} | {row['participants']} | {row['labelled_days']} | {row['exact_transitions']} |" for row in rows]
-    lines += ["", f"Compared with daily RHR: {gained} eligible days gained and {lost} lost.",
-              "See hr_source_eligibility_changes.csv for observation keys and sleeping_hr_excluded_scores.csv for excluded sources.",
-              "Unmatched ends are excluded; end-time discrepancies are retained in sleeping_hr_session_review_2022.csv and their cause is unverified.",
-              "Noon, CGM/HRV/temperature quality and history rules are unchanged. These are cohort counts, not model performance.",
-              "The HR aggregation algorithm and actual publication/sync times remain unspecified."]
-    (args.report_dir / "sleeping_hr_decision.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def save_temporal_review(tables: dict, daily: pd.DataFrame, args: argparse.Namespace) -> None:
@@ -739,15 +708,14 @@ def save_temporal_review(tables: dict, daily: pd.DataFrame, args: argparse.Names
     intervals = align_hrv_to_sleep(tables["heart_rate_variability_details"], sleep, settings)
     intervals.to_csv(args.processed_dir / "hrv_sleep_alignment_2022.csv", index=False)
     hour = PRIMARY_CUTOFF_HOUR
-    aligned = aligned_morning_days(quality, sleep, temperature, intervals, settings, hour)
-    aligned.to_csv(args.processed_dir / f"morning_alignment_{hour:02d}_2022.csv", index=False)
+    aligned = aligned_prediction_days(quality, sleep, temperature, intervals, settings, hour)
+    aligned.to_csv(args.processed_dir / f"prediction_alignment_{hour:02d}_2022.csv", index=False)
     aligned.loc[aligned["eligible_prediction"]].to_csv(
         args.processed_dir / f"eligible_observations_{hour:02d}_2022.csv", index=False)
-    save_hr_source_comparison(aligned, quality, args)
     attrition = temporal_attrition(aligned, hour)
     attrition.to_csv(args.report_dir / "temporal_attrition.csv", index=False)
     (args.report_dir / "temporal_protocol.md").write_text(
-        temporal_protocol_text(attrition, intervals), encoding="utf-8")
+        temporal_protocol_text(attrition, intervals, settings), encoding="utf-8")
 
 
 def build_quality_review(tables: dict, daily: pd.DataFrame, settings: dict) -> tuple:
@@ -778,6 +746,7 @@ def availability_counts(daily: pd.DataFrame, mask: pd.Series) -> dict:
     mask = mask.fillna(False).astype(bool)
     return {"participants": int(daily.loc[mask, "id"].nunique()), "days": int(mask.sum()),
             "labelled_days": int((mask & daily["phase"].notna()).sum()),
+            "luteal_days": int((mask & daily["luteal_status"].eq(1)).sum()),
             "exact_transitions": int((mask & daily["exact_luteal_onset"].eq(1).fillna(False)).sum()),
             "uncertain_entries": int((mask & daily["uncertain_luteal_entry"]).sum())}
 
@@ -874,7 +843,7 @@ def decision_log_text(effects: pd.DataFrame, attrition: pd.DataFrame,
                       sessions: pd.DataFrame, transitions: pd.DataFrame, settings: dict,
                       evidence: dict) -> str:
     lines = ["# Eligibility decision log: mcPHASES 2022", "",
-             "Effects below use each signal's exported calendar day. They do not apply a morning cutoff,",
+             "Effects below use each signal's exported calendar day. They do not apply a prediction cutoff,",
              "prior-day CGM lag, or trailing histories. They must not be used as the final modelling cohort.",
              "A transition counts as available here when its reference day passes the rule; neighbouring",
              "days and detection performance are not assessed. Independent effects are not additive.", "",
@@ -928,7 +897,8 @@ def decision_log_text(effects: pd.DataFrame, attrition: pd.DataFrame,
         lines.append(f"- {name}: {int(group['cross_midnight'].sum())} / {len(multiple)}.")
     lines += ["", "Sources reviewed " + SOURCE_REVIEW_DATE + ": raw/README.txt and"]
     lines += [f"- [{name}]({source['url']})" for name, source in EVIDENCE_SOURCES.items()]
-    lines += ["", "Remaining: cause of HRV overshoot, fixed morning cutoff,",
+    lines += ["", "For the active prediction cutoff and shared data requirements, see temporal_protocol.md when generated.",
+              "Remaining audit uncertainties: cause of HRV overshoot,",
               "clock/sync availability assumptions, trailing-history rules, and the final common cohort."]
     return "\n".join(lines) + "\n"
 
@@ -1048,8 +1018,8 @@ only. In particular, continuous heart_rate.csv has not been quality-audited.
 This is descriptive preparation, not a model-ready cohort or a performance evaluation.
 When the eligibility review is enabled, decision_log.md describes additional
 quality policies and their effects separately from this structural audit.
-No morning cutoff, history requirement, imputation, scaling or cohort threshold
-has been applied. Days span the union of the audited tables, not an assumed
+This descriptive table applies no prediction cutoff, imputation or cohort threshold.
+When temporal review is enabled, see temporal_protocol.md for the separate primary cohort. Days span the union of the audited tables, not an assumed
 fixed 90-day study. Session counts are assigned to their exported end day.
 
 ## Duplicate and quality policy
@@ -1094,9 +1064,9 @@ non-luteal label on the immediately preceding calendar day. Initial luteal
 observations and entries after missing labels are uncertain.
 Supplied labels are not independently hormone-validated ground truth.
 
-Before modelling, verify timestamp and
-availability conventions, fix a morning cutoff, align prior-day CGM and eligible
-overnight wearable measurements, and define shared coverage/history rules.
+The primary cohort and its timing assumptions are documented separately in
+temporal_protocol.md when temporal review is enabled. Participant splits and
+alert evaluation rules must be fixed before model evaluation.
 No clinical or causal conclusions can be drawn from this audit.
 
 ## Reproducibility

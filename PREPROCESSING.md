@@ -1,9 +1,9 @@
-# mcPHASES 2022 audit
+# mcPHASES 2022 analysis preparation
 
 Run from the thesis workspace with Python containing pandas and NumPy:
 
 ```powershell
-python code/preprocessing.py
+python code/main.py
 python -m unittest discover -s code/tests -v
 ```
 
@@ -11,14 +11,17 @@ On this workstation the verified interpreter is
 `C:/Users/anett/miniconda3/python.exe`. If the Windows `python` alias fails:
 
 ```powershell
-& C:/Users/anett/miniconda3/python.exe code/preprocessing.py
+& C:/Users/anett/miniconda3/python.exe code/main.py
 ```
 
-The workflow is independent of `scratch.py` and does not run models or change
-`main.py`. It audits labels/hormones, glucose, sleeping HR from sleep scores, daily RHR for description, HRV,
+The main entry point prepares features without fitting models or choosing participant
+splits. The audit stage checks labels/hormones, glucose, sleeping HR from sleep scores, daily RHR for description, HRV,
 computed temperature and sleep. Other exports are inventoried only.
 
-## Outputs
+## Descriptive audit outputs
+
+Running `preprocessing.py` alone produces audit outputs. Use `main.py` for the
+active 14:00 feature datasets described below.
 
 - `code/data/processed/audit_2022/`: seven audited 2022 tables and
   `daily_audit_2022.csv`, with one row per participant and calendar study day.
@@ -151,70 +154,89 @@ prospective modelling. Hypothetical session end-clock comparisons at 06:00,
 They do not prove actual device availability. Fitbit documents HRV processing
 after sleep and synchronisation; the export lacks verified sync/processing
 times and timezone conventions. Prior-day CGM, overnight HRV alignment, the
-fixed morning cutoff and trailing calendar histories remain a separate step.
+fixed prediction time remain a separate step in the primary protocol below.
 
-## Noon alignment with sleeping HR
+## Active 14:00 analysis datasets
 
-The active protocol uses **12:00 only** and sleep-score HR in place of daily RHR.
-Historical outputs are preserved; they are not the current cohort. Run with fresh
-output directories:
+Run `python code/main.py` from the thesis workspace. The defaults are:
+
+- `code/data/processed/primary_1400_2022/`: audited sources, alignment,
+  eligible observations and the shared feature datasets.
+- `results/primary_1400_2022/`: quality reports, `data_reduction.csv`,
+  `dataset_summary.json`, `temporal_protocol.md` and `run_config.json`.
+
+For another run use fresh paths; existing non-empty destinations are refused:
 
 ```powershell
-& C:/Users/anett/miniconda3/python.exe code/preprocessing.py --temporal-review --processed-dir code/data/processed/sleeping_hr_primary_2022 --report-dir results/sleeping_hr_primary_2022
+python code/main.py --processed-dir code/data/processed/primary_1400_repeat --report-dir results/primary_1400_repeat
 ```
 
-For a prediction on day t:
+For prediction day t, CGM uses the whole of calendar day t-1, with at least 70%
+nominal coverage and no uncovered gap over four hours, including day boundaries.
+Use one selected main sleep ending on t at or before **14:00**, including a sleep
+ending exactly at that time. Actual publication/synchronisation times are unknown.
+The computer's timezone does not redefine the assumed participant-local clocks.
 
-- CGM uses completed day t-1 and the unchanged 70% nominal coverage / four-hour
-  maximum uncovered-gap rules.
-- Sleeping HR comes from `sleep_score.csv.resting_heart_rate` (bpm). Require finite
-  positive HR, no conflicting score key, and an exact match of participant,
-  study interval, end day and end time to one selected valid main sleep. Use the
-  supplied value, preserving its original field; do not call it minimum HR.
-- The same main sleep must end on t at or before noon. Naps, ambiguous matches
-  and unmatched scores are excluded; do not average daily scores or guess matches.
-- HRV is from `heart_rate_variability_details.csv`: at least six usable five-minute
-  RMSSD intervals with coverage >=0.8 must fit wholly inside that main sleep.
-  Timestamps denote interval starts, including preceding-day intervals.
-- Skin temperature must match the same selected session under the existing rules.
-- Require all aligned inputs on three consecutive calendar days t-2, t-1 and t.
-  Glucose source days are t-3 through t-1; sleeping HR/HRV/temperature session end
-  days are t-2 through t. Historical labels are not required or used as predictors.
+At least two of these three wearable summaries must be usable:
 
-Daily RHR remains in the descriptive audit and a source-change comparison only;
-missing or zero daily RHR does not affect primary eligibility. Sleep is alignment
-and quality metadata; duration, efficiency, stages and sleep scores are not model
-predictors. No imputation, future data or alternative prediction cutoff is used.
+- Sleeping HR: positive finite sleep-score HR with an exact, unambiguous match
+  to the selected main-sleep end. Naps and unmatched scores remain unavailable.
+- HRV: median RMSSD from at least six valid five-minute periods wholly inside
+  that sleep, each with coverage >=0.8, followed by natural log. Intervals
+  beginning on the previous day are matched by the sleep end day.
+- Skin temperature: valid SKIN value and positive integer sample count, exactly
+  matched to that sleep. Conflicting/ambiguous sessions remain unavailable.
 
-The 2022 sleep-score assessment found 3,372 positive HR records across 42
-participants, with no duplicate session keys and 123 days containing multiple
-scores. Exactly 3,238 match selected main sleeps, 128 match non-main sessions,
-and six lack an exact end match. Same-day end discrepancies for those six are
-hours rather than small rounding errors; their cause remains unverified. These
-six are excluded without correcting timestamps. Of the 3,238 selected matches,
-2,848 end by noon, before CGM/HRV/temperature/history requirements.
+Daily RHR, sleep duration, sleep score and hormone values are not predictors.
+No three-day history, multi-day trends or participant baseline is required.
+The existing `add_calendar_history` helper is only for a possible later extension;
+no current output uses it. Historical noon/three-day outputs are preserved and
+superseded; do not mix them with the current datasets.
 
-Outputs include:
+### Feature files and missing values
 
-- `sleep_score_2022_audited.csv`: preserved source values and structural flags.
-- `sleeping_hr_session_review_2022.csv`: matching decisions, end-time discrepancies
-  and selected HR; `sleeping_hr_excluded_scores.csv` records excluded scores.
-- `morning_alignment_12_2022.csv`: full calendar grid, source days, sleeping HR
-  value/source timestamp, aligned signal flags and three-day history counts.
-- `eligible_observations_12_2022.csv`: one shared eligible table for all models.
-- `temporal_attrition.csv`, `temporal_protocol.md` and `sleeping_hr_decision.md`:
-  rules, cumulative cohort counts and remaining assumptions.
-- `hr_source_cohort_comparison.csv` and `hr_source_eligibility_changes.csv`:
-  legacy daily-RHR versus sleeping-HR cohorts, including gained/lost keys.
+- `prediction_alignment_14_2022.csv`: full calendar grid and quality decisions.
+- `eligible_observations_14_2022.csv`: days meeting the agreed rules.
+- `observations_2022.csv`: five features, outcomes, timing and missingness diagnostics.
+- `glucose_features_2022.csv`: keys plus median glucose (mmol/L) and glucose CV (%).
+- `wearable_features_2022.csv`: keys plus sleeping HR (bpm), log median RMSSD (ms)
+  and skin temperature (degrees Celsius).
+- `combined_features_2022.csv`: keys plus all five features.
+- `outcomes_2022.csv`: keys and phase/outcome fields, kept separate from predictors.
 
-Current eligibility is 36 participants, 1,289 labelled prediction days and 38
-eligible exact reference-transition dates, compared with 35/1,120/32 for daily
-RHR under otherwise identical noon rules. These are cohort counts, not model
-performance; onset-event evaluation rules and participant splits remain pending.
+All feature files have identical participant/day keys and row order. CGM CV is
+100 * sample standard deviation / mean, using equally weighted usable readings.
+Use only `model_inputs.FEATURE_SETS` columns as predictors. Keys, labels, onset
+flags and missing-value flags are metadata, never predictors.
 
-The score timestamp is assumed to identify the matching sleep end, not the
-publication time. Exact HR aggregation and publication/synchronisation times
-remain undocumented. Export clocks are assumed mutually aligned participant-local
-times; no timezone conversion is applied. The client computer's timezone does
-not redefine the participant measurement clocks. All audited raw-file hashes,
-parameters and software versions are recorded. No model-ready matrix is produced.
+The verified primary data have **42 participants, 2,450 days, 808 luteal days
+and 84 luteal starts**. Of these days, 2,044 have all three wearable summaries
+and 406 have two (30 missing HR, 331 missing HRV, 45 missing temperature).
+The data-reduction rows are 42/3,697/1,235/123, 42/2,746/906/92,
+42/2,529/835/87 and 42/2,450/808/84 (participants/days/luteal days/starts).
+These are data-availability counts, not model results.
+
+Missing wearable values deliberately remain blank in exported files. After
+choosing participant-disjoint folds, call:
+
+```python
+from model_inputs import FEATURE_SETS, replace_missing_wearables
+
+train_filled, validation_filled, medians = replace_missing_wearables(train, validation)
+x_train = train_filled[FEATURE_SETS["combined"]]
+x_validation = validation_filled[FEATURE_SETS["combined"]]
+```
+
+Pass subsets of `observations_2022.csv` with its diagnostics intact. Repeat this
+step inside every training/validation split; after selecting model settings,
+refit on all development participants before applying to the held-out test set.
+The helper rejects participant overlap and an entirely missing training feature.
+Use the same fitted medians for wearable-only and combined models. Original
+missingness flags stay unchanged for auditing after replacement. Fit any scaling
+on training data only, after replacement. Do not use full-dataset or test medians.
+
+No participant folds, model training or alert rules are created by this command.
+`features_ready=true` records the prepared features; `model_ready=false` means
+split-specific replacement/scaling and model development remain to be done.
+Run configuration records audited-source hashes, code hashes and package versions.
+Raw data remain read-only; generated datasets are kept locally and not committed.

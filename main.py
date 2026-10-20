@@ -20,7 +20,7 @@ def parse_main_arguments(argv=None):
                         help="Evaluate the fixed models using existing prepared inputs")
     workspace = Path(__file__).resolve().parents[1]
     parser.add_argument("--evaluation-dir", type=Path,
-                        default=workspace / "results/primary_evaluation_2022_v3",
+                        default=workspace / "results/primary_evaluation_2022_v4",
                         help="Empty directory for protocol, folds, predictions and metrics")
     return parser.parse_args(argv)
 

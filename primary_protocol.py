@@ -5,7 +5,7 @@ import numpy as np
 from preprocessing import KEY
 
 PRIMARY_SEED = 20261020
-PRIMARY_PROTOCOL_VERSION = "2026-10-20-primary-v3"
+PRIMARY_PROTOCOL_VERSION = "2026-10-20-primary-v4"
 OUTER_FOLDS = 5
 INNER_FOLDS = 3
 LOGISTIC_C_VALUES = (0.01, 0.1, 1.0, 10.0)

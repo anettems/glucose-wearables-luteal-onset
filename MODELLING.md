@@ -31,7 +31,7 @@ code/.venv/Scripts/python.exe -m unittest discover -s code/tests -v
 
 # Run the full primary evaluation from existing prepared inputs.
 code/.venv/Scripts/python.exe code/main.py --evaluate-primary `
-    --evaluation-dir results/primary_evaluation_2022_v3
+    --evaluation-dir results/primary_evaluation_2022_v4
 ```
 
 The evaluation directory must be empty. Existing outputs, raw data, and preparation
@@ -40,14 +40,15 @@ the feature tables; it requires fresh preparation output directories.
 
 ## Model definition and validation
 
-The implementation preserves the draft's definition of the penalty parameter:
+Protocol v4 uses scikit-learn's standard definition of the penalty parameter:
 
-`mean(binary log loss) + sum(non-intercept coefficients squared) / (2 * C)`.
+`sum(binary log loss) + sum(non-intercept coefficients squared) / (2 * C)`.
 
-The candidate values of this protocol parameter are 0.01, 0.1, 1 and 10.
-Scikit-learn's `C` is consequently set to `protocol_C / training_observations`.
-This conversion preserves the earlier objective; the recorded protocol parameter
-must not be confused with passing the same number directly to scikit-learn.
+The candidate values of C are 0.01, 0.1, 1 and 10, passed directly to
+`LogisticRegression`. Smaller C imposes stronger regularisation. Training size
+is not used to convert C. This changes the objective from protocol v3, which
+divided C by the number of training days. Any earlier evaluation outputs use a
+different model definition; a v4 evaluation must be saved in a fresh directory.
 The intercept is unpenalised, no class weights are used, and convergence warnings
 stop the run. A focused test checks the fitted objective's gradient.
 

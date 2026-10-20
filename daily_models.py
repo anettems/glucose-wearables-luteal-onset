@@ -14,12 +14,10 @@ from daily_metrics import daily_metrics
 from model_inputs import replace_missing_wearables
 
 
-def create_logistic_model(inverse_penalty_strength, training_observations):
-    """Build the fixed L2 estimator using the protocol's mean-loss scale."""
-    # sklearn scales its regularisation against the summed sample loss; the
-    # protocol defines C against the mean loss, so divide by training size.
+def create_logistic_model(inverse_penalty_strength):
+    """Pass the prespecified C directly to scikit-learn's L2 estimator."""
     return LogisticRegression(
-        C=inverse_penalty_strength / training_observations,
+        C=inverse_penalty_strength,
         solver="lbfgs",
         l1_ratio=0,
         fit_intercept=True,
@@ -49,7 +47,7 @@ def fit_and_predict(training, evaluation, feature_columns, inverse_penalty_stren
     evaluation_features = evaluation_filled[feature_columns].to_numpy(dtype=float)
     model = make_pipeline(
         StandardScaler(),
-        create_logistic_model(inverse_penalty_strength, len(training_features)),
+        create_logistic_model(inverse_penalty_strength),
     )
     fit_model(model, training_features, training_filled.luteal_status.to_numpy(dtype=int))
     scaler = model.named_steps["standardscaler"]

@@ -78,7 +78,7 @@ class PrimaryEvaluationTests(unittest.TestCase):
         self.assertEqual(metrics.average_precision([0, 1, 1], [0.1, 0.9, 0.8]), 1.0)
         self.assertEqual(metrics.roc_auc([0, 1, 1], [0.1, 0.9, 0.8]), 1.0)
         self.assertEqual(metrics.roc_auc([0, 1], [0.5, 0.5]), 0.5)
-        model = models.create_logistic_model(1.0, 4).fit(
+        model = models.create_logistic_model(1.0).fit(
             np.array([[0.0], [1.0], [2.0], [3.0]]), np.array([0, 0, 1, 1]),
         )
         coefficients = np.r_[model.intercept_, model.coef_[0]]
@@ -86,17 +86,19 @@ class PrimaryEvaluationTests(unittest.TestCase):
         self.assertTrue(np.isfinite(coefficients).all())
         self.assertGreater(iterations, 0)
 
-    def test_sklearn_penalty_mapping_matches_protocol_mean_loss(self):
-        features = np.array([[-1.5], [-0.5], [0.5], [1.5]])
-        labels = np.array([0, 0, 1, 1])
-        inverse_penalty_strength = 0.7
-        model = models.create_logistic_model(inverse_penalty_strength, len(labels)).fit(features, labels)
-        coefficients = np.r_[model.intercept_, model.coef_[0]]
+    def test_sklearn_c_matches_sum_loss_objective_for_the_prespecified_grid(self):
+        features = np.array([[-1.8], [-0.6], [0.2], [0.5], [1.9], [2.5]])
+        labels = np.array([0, 0, 0, 1, 1, 1])
         design = np.column_stack([np.ones(len(features)), features])
-        probabilities = 1 / (1 + np.exp(-(design @ coefficients)))
-        gradient = design.T @ (probabilities - labels) / len(labels)
-        gradient[1:] += coefficients[1:] / inverse_penalty_strength
-        self.assertLess(np.max(np.abs(gradient)), 1e-6)
+        for candidate_c in config.LOGISTIC_C_VALUES:
+            with self.subTest(C=candidate_c):
+                model = models.create_logistic_model(candidate_c).fit(features, labels)
+                self.assertEqual(model.C, candidate_c)
+                coefficients = np.r_[model.intercept_, model.coef_[0]]
+                probabilities = 1 / (1 + np.exp(-(design @ coefficients)))
+                gradient = design.T @ (probabilities - labels)
+                gradient[1:] += coefficients[1:] / candidate_c
+                self.assertLess(np.max(np.abs(gradient)), 1e-6)
 
     def test_pipeline_scaling_uses_training_participants_only(self):
         observations = synthetic_observations(participants=4)
@@ -209,6 +211,9 @@ class PrimaryEvaluationTests(unittest.TestCase):
             protocol = json.loads((output / "evaluation_protocol.json").read_text())
             self.assertEqual(protocol["software_versions"]["scikit-learn"], evaluation.software_versions()["scikit-learn"])
             self.assertIn("LogisticRegression", protocol["model_implementation"])
+            self.assertEqual(protocol["version"], config.PRIMARY_PROTOCOL_VERSION)
+            self.assertEqual(protocol["c_convention"], "scikit_learn_standard")
+            self.assertEqual(protocol["sklearn_c_conversion"], "identity: sklearn_C = protocol_C")
             self.assertTrue((output / "validation_predictions.csv").exists())
 
             parameters = pd.read_csv(output / "fitted_parameters.csv")
@@ -222,6 +227,10 @@ class PrimaryEvaluationTests(unittest.TestCase):
             settings = pd.read_csv(output / "selected_settings.csv")
             self.assertEqual(len(settings), 15)
             self.assertTrue(set(settings.inverse_penalty_strength).issubset(config.LOGISTIC_C_VALUES))
+            fitted_c = parameters.loc[parameters.parameter_category.eq("sklearn_C")].merge(
+                settings, on=["outer_test_fold", "input_set"], validate="one_to_one",
+            )
+            np.testing.assert_array_equal(fitted_c.value, fitted_c.inverse_penalty_strength)
 
 
 if __name__ == "__main__":

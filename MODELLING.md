@@ -98,3 +98,11 @@ These analyses assess agreement with supplied phase labels and assume completed
 measurements were available by 14:00. Actual upload times are unavailable. They do
 not independently validate ovulation, establish clinical performance or support
 causal conclusions.
+
+## Descriptive reports and figures
+
+The separate reporting command creates cohort tables and PNG/PDF figures from
+prepared observations and completed evaluation outputs. It also provides fixed-bin
+calibration summaries and onset counts with timing plots. See `REPORTING.md` for
+commands, outputs and interpretation. Reporting does not change the frozen model,
+folds, preprocessing, tuning, bootstrap or alert rules.

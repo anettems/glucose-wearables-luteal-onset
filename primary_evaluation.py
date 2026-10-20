@@ -2,6 +2,8 @@
 
 import json
 import platform
+import shutil
+from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
 
@@ -12,14 +14,17 @@ import primary_protocol as protocol
 from daily_metrics import bootstrap_metrics, daily_metrics, summary_tables, validate_paired_predictions
 from daily_models import fit_and_predict, tune_logistic_model
 from model_inputs import FEATURE_SETS, validate_features
-from onset_alerts import evaluate_test_alerts, select_alert_rule
-from participant_folds import build_fold_assignments
+from onset_alerts import evaluate_test_alerts, reference_evaluability, select_alert_rule
+from participant_folds import build_fold_assignments, validate_fold_assignment
 
 
 SOURCE_FILES = ["main.py", "primary_protocol.py", "primary_evaluation.py", "participant_folds.py",
                 "daily_models.py", "daily_metrics.py", "onset_alerts.py", "model_inputs.py", "preprocessing.py",
                 "requirements.txt"]
 INPUT_FILES = ["observations_2022.csv", "prediction_alignment_14_2022.csv"]
+FREEZE_FILES = ["evaluation_protocol.json", "software_versions.json", "provenance.json",
+                "participant_folds.csv", "validation_fold_assignments.csv", "fold_feasibility.csv",
+                "cohort_summary.json", "methods_snapshot.tex", "methods_consistency.md", "README.md"]
 
 
 def write_json(path, record):
@@ -87,6 +92,9 @@ def protocol_record():
         "feature_sets": FEATURE_SETS, "observation_key": protocol.KEY,
         "prediction_cutoff": "14:00:00",
         "wearable_replacement": "feature_median_from_training_participants_only",
+        "scaling": "training_only_feature_mean_and_population_standard_deviation; constant_scale_1",
+        "reference_outcome": "supplied_phase_label_luteal_versus_other_recognised_phases",
+        "reference_start": "observed_non_luteal_to_luteal_on_consecutive_calendar_days_in_full_alignment",
         "logistic_objective": "sum_binary_log_loss + sum(non_intercept_coefficients_squared) / (2 * C)",
         "model_implementation": "sklearn.pipeline.Pipeline(StandardScaler, LogisticRegression)",
         "model_solver": "lbfgs", "class_weight": None,
@@ -97,6 +105,9 @@ def protocol_record():
         "primary_comparison": "combined_minus_wearable_average_precision",
         "model_selection": "highest_mean_validation_AP_then_smaller_C",
         "alert_thresholds": protocol.ALERT_THRESHOLDS, "alert_consecutive_days": protocol.ALERT_CONSECUTIVE_DAYS,
+        "positive_day": "probability_greater_than_or_equal_to_threshold",
+        "alert_validation_predictions": "validation_predictions_for_the_validation_selected_C",
+        "event_f1": "2 * matched / (2 * matched + missed_evaluable + unmatched_alerts); zero_if_denominator_zero",
         "alert_selection": "highest_mean_validation_event_F1_then_higher_threshold_then_two_days",
         "alert_reset": "only_next_available_prediction_below_threshold; missing_day_breaks_pending_streak",
         "alert_match_window_days": protocol.ALERT_MATCH_WINDOW_DAYS,
@@ -104,11 +115,103 @@ def protocol_record():
         "minimum_evaluable_starts_per_fold": 1,
         "bootstrap_resamples": protocol.BOOTSTRAP_RESAMPLES, "bootstrap_seed": protocol.BOOTSTRAP_SEED,
         "bootstrap_interval": "95_percentile_participant_resampling",
+        "bootstrap_quantiles": [0.025, 0.975], "bootstrap_quantile_method": "linear",
         "bootstrap_scope": "conditional on the fitted cross-validation models",
         "undefined_bootstrap_metrics": "retain draw with NaN; use finite replicates and report their count",
         "fold_allocation": f"seeded_capacity_balanced_greedy_then_up_to_{protocol.MAX_FOLD_SWAP_PASSES}_swap_passes",
         "software_versions": software_versions(),
     }
+
+
+def methods_snapshot(thesis_path):
+    text = Path(thesis_path).read_text(encoding="utf-8")
+    start = text.index(r"\section{Research material and methods}")
+    end = text.index(r"\clearpage", start)
+    return text[start:end].rstrip() + "\n"
+
+
+def freeze_primary_protocol(processed_dir, report_dir, freeze_dir, *, raw_dir=None, thesis_path=None):
+    """Save a complete protocol and feasible assignments without fitting any model."""
+    processed_dir, report_dir = Path(processed_dir).resolve(), Path(report_dir).resolve()
+    output = create_evaluation_directory(freeze_dir, processed_dir, report_dir, raw_dir)
+    thesis_path = Path(thesis_path or Path(__file__).resolve().parents[1] / "latex/thesis.tex")
+    observations, references, _ = load_primary_inputs(processed_dir, report_dir)
+    test, validation, feasibility = build_fold_assignments(observations, references)
+    write_json(output / "evaluation_protocol.json", protocol_record())
+    write_json(output / "software_versions.json", software_versions())
+    provenance = {**provenance_record(processed_dir, report_dir),
+                  "thesis_source_sha256": preprocessing.file_sha256(thesis_path)}
+    write_json(output / "provenance.json", provenance)
+    for name, frame in [("participant_folds", test), ("validation_fold_assignments", validation),
+                        ("fold_feasibility", feasibility)]:
+        frame.to_csv(output / f"{name}.csv", index=False)
+    write_json(output / "cohort_summary.json", {
+        "study_interval": 2022, "participants": int(observations.id.nunique()), "eligible_days": len(observations),
+        "luteal_days": int(observations.luteal_status.sum()),
+        "eligible_day_exact_starts": int(observations.exact_luteal_onset.eq(1).sum()),
+        "full_alignment_exact_starts": len(references),
+        "evaluable_exact_starts": int(reference_evaluability(observations, references).evaluable.sum()),
+    })
+    (output / "methods_snapshot.tex").write_text(methods_snapshot(thesis_path), encoding="utf-8")
+    shutil.copyfile(Path(__file__).parent / "PROTOCOL_REVIEW.md", output / "methods_consistency.md")
+    (output / "README.md").write_text(
+        "# Frozen primary evaluation protocol v4\n\n"
+        "This directory contains the final protocol, methods snapshot, software versions, "
+        "input/source hashes and saved participant assignments. No model was fitted by the freeze command.\n\n"
+        "Evaluation must load these assignments with --frozen-protocol-dir. "
+        "The loader checks every saved file, current protocol, software, input and analysis-source hash. "
+        "Changed inputs or settings require a new documented freeze in a fresh directory.\n",
+        encoding="utf-8",
+    )
+    write_json(output / "freeze_manifest.json", {
+        "status": "frozen", "protocol_version": protocol.PRIMARY_PROTOCOL_VERSION,
+        "frozen_at_utc": datetime.now(timezone.utc).isoformat(), "predictions_generated": False,
+        "files": {name: preprocessing.file_sha256(output / name) for name in FREEZE_FILES},
+    })
+    return {"participants": int(observations.id.nunique()), "days": len(observations), "output_dir": output}
+
+
+def validate_saved_assignments(observations, references, test, validation):
+    counts = [validate_fold_assignment(observations, references, test, "outer_test_fold",
+                                      protocol.OUTER_FOLDS).assign(stage="outer")]
+    if set(validation.outer_test_fold) != set(range(1, protocol.OUTER_FOLDS + 1)):
+        raise ValueError("Frozen validation assignments do not cover all test folds")
+    for test_fold in range(1, protocol.OUTER_FOLDS + 1):
+        ids = test.loc[test.outer_test_fold.ne(test_fold), "id"]
+        development = observations.loc[observations.id.isin(ids)]
+        starts = references.loc[references.id.isin(ids)]
+        assignments = validation.loc[validation.outer_test_fold.eq(test_fold), ["id", "validation_fold"]]
+        counted = validate_fold_assignment(development, starts, assignments, "validation_fold", protocol.INNER_FOLDS)
+        counts.append(counted.assign(stage="validation", outer_test_fold=test_fold))
+    return pd.concat(counts, ignore_index=True)
+
+
+def load_frozen_protocol(freeze_dir, processed_dir, report_dir, observations, references):
+    """Verify the freeze and return saved folds; never create a new allocation."""
+    freeze_dir = Path(freeze_dir).resolve()
+    manifest = json.loads((freeze_dir / "freeze_manifest.json").read_text(encoding="utf-8"))
+    if (manifest.get("status") != "frozen" or manifest.get("protocol_version") != protocol.PRIMARY_PROTOCOL_VERSION
+            or manifest.get("predictions_generated") is not False
+            or set(manifest.get("files", {})) != set(FREEZE_FILES)):
+        raise ValueError("Incomplete frozen protocol manifest")
+    for name in FREEZE_FILES:
+        if preprocessing.file_sha256(freeze_dir / name) != manifest["files"][name]:
+            raise ValueError(f"Frozen protocol file changed: {name}")
+    saved = json.loads((freeze_dir / "evaluation_protocol.json").read_text(encoding="utf-8"))
+    if json.dumps(saved, sort_keys=True) != json.dumps(protocol_record(), sort_keys=True):
+        raise ValueError("Current protocol or software versions differ from the frozen protocol")
+    provenance = json.loads((freeze_dir / "provenance.json").read_text(encoding="utf-8"))
+    if any(provenance.get(key) != value for key, value in provenance_record(processed_dir, report_dir).items()):
+        raise ValueError("Current inputs or analysis sources differ from the frozen protocol")
+    test = pd.read_csv(freeze_dir / "participant_folds.csv")
+    validation = pd.read_csv(freeze_dir / "validation_fold_assignments.csv")
+    feasibility = pd.read_csv(freeze_dir / "fold_feasibility.csv")
+    actual = validate_saved_assignments(observations, references, test, validation)
+    try:
+        pd.testing.assert_frame_equal(actual, feasibility, check_dtype=False)
+    except AssertionError as error:
+        raise ValueError("Frozen fold counts disagree with the current cohort") from error
+    return test, validation, feasibility
 
 
 def provenance_record(processed_dir, report_dir):
@@ -218,15 +321,21 @@ def save_tables(output_dir, tables):
     )
 
 
-def run_primary_evaluation(processed_dir, report_dir, evaluation_dir, *, raw_dir=None):
-    """Persist the protocol and feasible folds before making any test prediction."""
+def run_primary_evaluation(processed_dir, report_dir, evaluation_dir, *, frozen_protocol_dir, raw_dir=None):
+    """Use the verified frozen protocol and assignments to generate test predictions."""
     processed_dir, report_dir = Path(processed_dir).resolve(), Path(report_dir).resolve()
     output_dir = create_evaluation_directory(evaluation_dir, processed_dir, report_dir, raw_dir)
     try:
         observations, references, preparation = load_primary_inputs(processed_dir, report_dir)
-        write_json(output_dir / "evaluation_protocol.json", protocol_record())
-        write_json(output_dir / "provenance.json", provenance_record(processed_dir, report_dir))
-        test_folds, validation_folds, feasibility = build_fold_assignments(observations, references)
+        test_folds, validation_folds, feasibility = load_frozen_protocol(
+            frozen_protocol_dir, processed_dir, report_dir, observations, references,
+        )
+        for name in ["evaluation_protocol.json", "provenance.json", "software_versions.json"]:
+            shutil.copyfile(Path(frozen_protocol_dir) / name, output_dir / name)
+        write_json(output_dir / "frozen_protocol_reference.json", {
+            "directory": str(Path(frozen_protocol_dir).resolve()),
+            "manifest_sha256": preprocessing.file_sha256(Path(frozen_protocol_dir) / "freeze_manifest.json"),
+        })
         save_tables(output_dir, {"participant_folds": test_folds, "validation_fold_assignments": validation_folds,
                                  "fold_feasibility": feasibility})
         write_json(output_dir / "run_status.json", {"status": "running"})

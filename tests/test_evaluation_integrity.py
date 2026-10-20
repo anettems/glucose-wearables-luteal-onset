@@ -23,7 +23,7 @@ import participant_folds as folds
 import primary_evaluation as evaluation
 import primary_protocol as config
 from model_inputs import FEATURE_SETS, validate_features
-from test_primary_evaluation import prediction_rows, synthetic_observations, synthetic_references
+from test_primary_evaluation import freeze_synthetic_protocol, prediction_rows, synthetic_observations, synthetic_references
 
 
 def paired_predictions():
@@ -170,6 +170,7 @@ class EvaluationIntegrityTests(unittest.TestCase):
             observations.to_csv(processed / "observations_2022.csv", index=False)
             alignment.to_csv(processed / "prediction_alignment_14_2022.csv", index=False)
             (report / "run_config.json").write_text(json.dumps({"features_ready": True, "prediction_cutoff": "14:00:00"}))
+            frozen = freeze_synthetic_protocol(root, processed, report)
             def stop_after_check(*args):
                 for name in ["evaluation_protocol.json", "participant_folds.csv", "validation_fold_assignments.csv",
                              "fold_feasibility.csv", "provenance.json"]:
@@ -177,7 +178,7 @@ class EvaluationIntegrityTests(unittest.TestCase):
                 raise RuntimeError("intentional stop before predictions")
             with patch.object(evaluation, "evaluate_participant_folds", side_effect=stop_after_check):
                 with self.assertRaisesRegex(RuntimeError, "intentional stop"):
-                    evaluation.run_primary_evaluation(processed, report, output)
+                    evaluation.run_primary_evaluation(processed, report, output, frozen_protocol_dir=frozen)
             self.assertEqual(json.loads((output / "run_status.json").read_text())["status"], "failed")
             self.assertFalse((output / "model_predictions.csv").exists())
             alignment.loc[0, "luteal_status"] = 1
@@ -191,6 +192,8 @@ class EvaluationIntegrityTests(unittest.TestCase):
             main.main(["--help"])
         self.assertIn("--evaluate-primary", stream.getvalue())
         self.assertIn("--evaluation-dir", stream.getvalue())
+        self.assertIn("--freeze-primary", stream.getvalue())
+        self.assertIn("--frozen-protocol-dir", stream.getvalue())
         observations = synthetic_observations().assign(luteal_status=2)
         with self.assertRaisesRegex(ValueError, "binary"):
             validate_features(observations)

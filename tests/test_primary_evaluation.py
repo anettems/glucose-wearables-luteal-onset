@@ -73,6 +73,15 @@ def prediction_rows(days, probabilities):
     })
 
 
+def freeze_synthetic_protocol(root, processed, report):
+    """Use a minimal methods fixture; the freeze never compiles or fits it."""
+    thesis = root / "methods.tex"
+    thesis.write_text("\\section{Research material and methods}\nSynthetic test fixture.\n\\clearpage\n")
+    frozen = root / "frozen"
+    evaluation.freeze_primary_protocol(processed, report, frozen, thesis_path=thesis)
+    return frozen
+
+
 class PrimaryEvaluationTests(unittest.TestCase):
     def test_sklearn_metrics_and_logistic_fit_are_finite(self):
         self.assertEqual(metrics.average_precision([0, 1, 1], [0.1, 0.9, 0.8]), 1.0)
@@ -195,7 +204,9 @@ class PrimaryEvaluationTests(unittest.TestCase):
             }), encoding="utf-8")
 
             with patch.object(config, "BOOTSTRAP_RESAMPLES", 12):
-                result = main.run_primary_evaluation(processed, report, output)
+                frozen = freeze_synthetic_protocol(root, processed, report)
+                with patch.object(evaluation, "build_fold_assignments", side_effect=AssertionError("Do not reallocate")):
+                    result = main.run_primary_evaluation(processed, report, output, frozen_protocol_dir=frozen)
 
             self.assertEqual(result["participants"], 10)
             predictions = pd.read_csv(output / "model_predictions.csv")

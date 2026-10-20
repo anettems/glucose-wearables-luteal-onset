@@ -29,14 +29,22 @@ code/.venv/Scripts/python.exe code/main.py --help
 # Run focused tests on synthetic data.
 code/.venv/Scripts/python.exe -m unittest discover -s code/tests -v
 
-# Run the full primary evaluation from existing prepared inputs.
+# Freeze the methods, versions and feasible folds without fitting a model.
+code/.venv/Scripts/python.exe code/main.py --freeze-primary `
+    --frozen-protocol-dir results/primary_protocol_2022_v4
+
+# Run the primary evaluation using the saved assignments.
 code/.venv/Scripts/python.exe code/main.py --evaluate-primary `
+    --frozen-protocol-dir results/primary_protocol_2022_v4 `
     --evaluation-dir results/primary_evaluation_2022_v4
 ```
 
 The evaluation directory must be empty. Existing outputs, raw data, and preparation
 directories are protected. Calling `main.py` without `--evaluate-primary` prepares
-the feature tables; it requires fresh preparation output directories.
+the feature tables unless `--freeze-primary` is selected; preparation requires fresh
+output directories. Freezing also requires an empty destination. Evaluation checks
+the freeze manifest, file hashes, current settings, software versions and source/input
+hashes, and loads the saved folds. It refuses to proceed when they differ.
 
 ## Model definition and validation
 
@@ -66,9 +74,11 @@ exists within the three-day matching window.
 
 ## Saved evidence
 
-Before any test prediction, the evaluation saves its versioned protocol,
-participant and validation fold assignments, feasibility counts, input hashes,
-analysis-source hashes and software versions. Completed runs contain:
+The freeze saves the versioned protocol, participant and validation fold assignments,
+feasibility counts, input and analysis-source hashes, software versions, a methods
+snapshot and a thesis/code consistency review. A timestamped manifest records file
+hashes. The evaluation copies this verified evidence before making test predictions.
+Completed runs contain:
 
 - Test and selected-setting validation predictions on the original keys.
 - Model and alert tuning scores, selected settings and fitted parameters.

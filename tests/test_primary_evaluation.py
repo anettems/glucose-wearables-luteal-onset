@@ -13,6 +13,12 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import main
+import daily_metrics as metrics
+import daily_models as models
+import onset_alerts as onset
+import participant_folds as folds
+import primary_evaluation as evaluation
+import primary_protocol as config
 from model_inputs import FEATURE_SETS
 
 
@@ -52,9 +58,9 @@ def synthetic_observations(participants=10):
 
 
 def synthetic_references(observations):
-    starts = observations.loc[observations.exact_luteal_onset.eq(1), main.KEY].copy()
+    starts = observations.loc[observations.exact_luteal_onset.eq(1), config.KEY].copy()
     extra = pd.DataFrame([{"id": 1, "study_interval": 2022, "day_in_study": 7}])
-    return pd.concat([starts, extra], ignore_index=True).sort_values(main.KEY).reset_index(drop=True)
+    return pd.concat([starts, extra], ignore_index=True).sort_values(config.KEY).reset_index(drop=True)
 
 
 def prediction_rows(days, probabilities):
@@ -69,14 +75,14 @@ def prediction_rows(days, probabilities):
 
 class PrimaryEvaluationTests(unittest.TestCase):
     def test_sklearn_metrics_and_logistic_fit_are_finite(self):
-        self.assertEqual(main.average_precision([0, 1, 1], [0.1, 0.9, 0.8]), 1.0)
-        self.assertEqual(main.roc_auc([0, 1, 1], [0.1, 0.9, 0.8]), 1.0)
-        self.assertEqual(main.roc_auc([0, 1], [0.5, 0.5]), 0.5)
-        coefficients, iterations = main.fit_l2_logistic(
-            np.array([[0.0], [1.0], [2.0], [3.0]]),
-            np.array([0, 0, 1, 1]),
-            1.0,
+        self.assertEqual(metrics.average_precision([0, 1, 1], [0.1, 0.9, 0.8]), 1.0)
+        self.assertEqual(metrics.roc_auc([0, 1, 1], [0.1, 0.9, 0.8]), 1.0)
+        self.assertEqual(metrics.roc_auc([0, 1], [0.5, 0.5]), 0.5)
+        model = models.create_logistic_model(1.0, 4).fit(
+            np.array([[0.0], [1.0], [2.0], [3.0]]), np.array([0, 0, 1, 1]),
         )
+        coefficients = np.r_[model.intercept_, model.coef_[0]]
+        iterations = model.n_iter_[0]
         self.assertTrue(np.isfinite(coefficients).all())
         self.assertGreater(iterations, 0)
 
@@ -84,9 +90,10 @@ class PrimaryEvaluationTests(unittest.TestCase):
         features = np.array([[-1.5], [-0.5], [0.5], [1.5]])
         labels = np.array([0, 0, 1, 1])
         inverse_penalty_strength = 0.7
-        coefficients, _ = main.fit_l2_logistic(features, labels, inverse_penalty_strength)
+        model = models.create_logistic_model(inverse_penalty_strength, len(labels)).fit(features, labels)
+        coefficients = np.r_[model.intercept_, model.coef_[0]]
         design = np.column_stack([np.ones(len(features)), features])
-        probabilities = main.sigmoid(design @ coefficients)
+        probabilities = 1 / (1 + np.exp(-(design @ coefficients)))
         gradient = design.T @ (probabilities - labels) / len(labels)
         gradient[1:] += coefficients[1:] / inverse_penalty_strength
         self.assertLess(np.max(np.abs(gradient)), 1e-6)
@@ -98,7 +105,7 @@ class PrimaryEvaluationTests(unittest.TestCase):
         feature_columns = FEATURE_SETS["combined"]
         evaluation.loc[:, feature_columns] = evaluation.loc[:, feature_columns] + 1000
 
-        _, parameters = main.fit_and_predict(
+        _, parameters = models.fit_and_predict(
             training, evaluation, feature_columns, inverse_penalty_strength=1.0,
         )
 
@@ -109,8 +116,8 @@ class PrimaryEvaluationTests(unittest.TestCase):
     def test_fold_assignments_are_reproducible_and_participant_disjoint(self):
         observations = synthetic_observations()
         references = synthetic_references(observations)
-        first = main.build_fold_assignments(observations, references)
-        second = main.build_fold_assignments(observations, references)
+        first = folds.build_fold_assignments(observations, references)
+        second = folds.build_fold_assignments(observations, references)
         pd.testing.assert_frame_equal(first[0], second[0])
         pd.testing.assert_frame_equal(first[1], second[1])
         outer, inner, feasibility = first
@@ -126,11 +133,11 @@ class PrimaryEvaluationTests(unittest.TestCase):
 
     def test_alerts_break_pending_sequences_but_reset_only_below_threshold(self):
         pending = prediction_rows([1, 3, 4], [0.9, 0.9, 0.9])
-        alerts = main.generate_alerts(pending, threshold=0.5, consecutive_days=2)
+        alerts = onset.generate_alerts(pending, threshold=0.5, consecutive_days=2)
         self.assertEqual(alerts.alert_day_in_study.tolist(), [4])
 
         active = prediction_rows([1, 2, 4, 5, 6], [0.9, 0.9, 0.9, 0.1, 0.9])
-        alerts = main.generate_alerts(active, threshold=0.5, consecutive_days=1)
+        alerts = onset.generate_alerts(active, threshold=0.5, consecutive_days=1)
         self.assertEqual(alerts.alert_day_in_study.tolist(), [1, 6])
 
     def test_full_alignment_start_is_evaluable_and_tie_prefers_earlier_alert(self):
@@ -139,7 +146,7 @@ class PrimaryEvaluationTests(unittest.TestCase):
             {"id": 1, "study_interval": 2022, "day_in_study": 4},
             {"id": 1, "study_interval": 2022, "day_in_study": 7},
         ])
-        _, reference_events, _, metrics = main.evaluate_alerts(
+        _, reference_events, _, metrics = onset.evaluate_alerts(
             predictions, references, threshold=0.5, consecutive_days=1,
         )
         first = reference_events.loc[reference_events.reference_day_in_study.eq(4)].iloc[0]
@@ -163,7 +170,7 @@ class PrimaryEvaluationTests(unittest.TestCase):
             {"id": 2, "study_interval": 2022, "day_in_study": 2},
             {"id": 3, "study_interval": 2022, "day_in_study": 2},
         ])
-        threshold, days, _ = main.select_alert_rule(predictions, references)
+        threshold, days, _ = onset.select_alert_rule(predictions, references)
         self.assertEqual(threshold, 0.9)
         self.assertEqual(days, 2)
 
@@ -176,38 +183,45 @@ class PrimaryEvaluationTests(unittest.TestCase):
             processed.mkdir()
             report.mkdir()
             observations.to_csv(processed / "observations_2022.csv", index=False)
-            alignment = references.copy()
-            alignment["exact_luteal_onset"] = 1
+            alignment = observations[config.KEY + ["luteal_status", "exact_luteal_onset"]].copy()
+            extra = references.loc[references.day_in_study.eq(7)].assign(luteal_status=1, exact_luteal_onset=1)
+            alignment = pd.concat([alignment, extra], ignore_index=True)
             alignment.to_csv(processed / "prediction_alignment_14_2022.csv", index=False)
             (report / "run_config.json").write_text(json.dumps({
                 "features_ready": True,
                 "prediction_cutoff": "14:00:00",
             }), encoding="utf-8")
 
-            with patch.object(main, "BOOTSTRAP_RESAMPLES", 12):
+            with patch.object(config, "BOOTSTRAP_RESAMPLES", 12):
                 result = main.run_primary_evaluation(processed, report, output)
 
             self.assertEqual(result["participants"], 10)
             predictions = pd.read_csv(output / "model_predictions.csv")
             self.assertEqual(len(predictions), len(observations) * len(FEATURE_SETS))
-            self.assertFalse(predictions.duplicated(["input_set"] + main.KEY).any())
+            self.assertFalse(predictions.duplicated(["input_set"] + config.KEY).any())
             for input_set in FEATURE_SETS:
-                actual = predictions.loc[predictions.input_set.eq(input_set), main.KEY].sort_values(main.KEY)
-                expected = observations[main.KEY].sort_values(main.KEY)
+                actual = predictions.loc[predictions.input_set.eq(input_set), config.KEY].sort_values(config.KEY)
+                expected = observations[config.KEY].sort_values(config.KEY)
                 pd.testing.assert_frame_equal(actual.reset_index(drop=True), expected.reset_index(drop=True))
             self.assertTrue(predictions.probability.between(0, 1).all())
             self.assertEqual(len(pd.read_csv(output / "bootstrap_metrics.csv")), 12)
             self.assertTrue((output / "evaluation_protocol.json").exists())
             protocol = json.loads((output / "evaluation_protocol.json").read_text())
-            self.assertEqual(protocol["scikit_learn_version"], main.sklearn.__version__)
+            self.assertEqual(protocol["software_versions"]["scikit-learn"], evaluation.software_versions()["scikit-learn"])
             self.assertIn("LogisticRegression", protocol["model_implementation"])
             self.assertTrue((output / "validation_predictions.csv").exists())
 
             parameters = pd.read_csv(output / "fitted_parameters.csv")
             self.assertTrue(parameters.parameter_category.eq("feature_means").any())
+            medians = parameters.loc[parameters.parameter_category.eq("wearable_medians")]
+            self.assertTrue(medians.groupby(["outer_test_fold", "parameter"]).value.nunique().eq(1).all())
+            self.assertEqual(json.loads((output / "run_status.json").read_text())["status"], "complete")
+            self.assertTrue((output / "onset_summary.csv").is_file())
+            manifest = json.loads((output / "provenance.json").read_text())
+            self.assertIn("daily_models.py", manifest["sources"])
             settings = pd.read_csv(output / "selected_settings.csv")
             self.assertEqual(len(settings), 15)
-            self.assertTrue(set(settings.inverse_penalty_strength).issubset(main.LOGISTIC_C_VALUES))
+            self.assertTrue(set(settings.inverse_penalty_strength).issubset(config.LOGISTIC_C_VALUES))
 
 
 if __name__ == "__main__":

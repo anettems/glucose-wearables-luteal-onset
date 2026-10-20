@@ -53,6 +53,12 @@ def construct_features(eligible, glucose, intervals, temperature):
 
 
 def validate_features(data):
+    if data.empty:
+        raise ValueError("The eligible feature table is empty")
+    for column in prep.KEY:
+        values = pd.to_numeric(data[column], errors="coerce")
+        if not (np.isfinite(values) & values.gt(0) & values.mod(1).eq(0)).all():
+            raise ValueError(f"Invalid positive integer key: {column}")
     if data.duplicated(prep.KEY).any() or not data.study_interval.eq(2022).all():
         raise ValueError("Expected unique 2022 observation keys")
     features = data[FEATURE_SETS["combined"]]
@@ -64,8 +70,8 @@ def validate_features(data):
         raise ValueError("Fewer than two valid wearable summaries")
     if not features[WEARABLE_FEATURES].notna().sum(axis=1).eq(data.valid_wearable_count).all():
         raise ValueError("Wearable count disagrees with feature availability")
-    if data.luteal_status.isna().any():
-        raise ValueError("Classification outcome is missing")
+    if not data.luteal_status.isin([0, 1]).all():
+        raise ValueError("Classification outcome must contain only binary 0/1 values")
     for feature, flag in zip(WEARABLE_FEATURES, WEARABLE_FLAGS):
         if not data[feature].notna().eq(data[flag]).all():
             raise ValueError(f"Feature availability disagrees with quality flag: {feature}")

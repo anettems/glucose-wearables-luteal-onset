@@ -1,0 +1,19 @@
+"""Fixed primary analysis settings; changes require a new protocol version."""
+
+import numpy as np
+
+from preprocessing import KEY
+
+PRIMARY_SEED = 20261020
+PRIMARY_PROTOCOL_VERSION = "2026-10-20-primary-v3"
+OUTER_FOLDS = 5
+INNER_FOLDS = 3
+LOGISTIC_C_VALUES = (0.01, 0.1, 1.0, 10.0)
+LOGISTIC_MAX_ITERATIONS = 1000
+LOGISTIC_TOLERANCE = 1e-10
+ALERT_THRESHOLDS = tuple(np.round(np.arange(0.1, 1.0, 0.1), 1))
+ALERT_CONSECUTIVE_DAYS = (1, 2)
+ALERT_MATCH_WINDOW_DAYS = 3
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = PRIMARY_SEED + 1
+MAX_FOLD_SWAP_PASSES = 20

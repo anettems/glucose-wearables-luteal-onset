@@ -88,7 +88,8 @@ TABLE_SPECS = {
 }
 
 
-def parse_arguments(argv=None, *, prepare=False) -> argparse.Namespace:
+def create_argument_parser(*, prepare=False) -> argparse.ArgumentParser:
+    """Share input options with the primary analysis entry point."""
     workspace = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-dir", type=Path, default=workspace / "code/data/raw")
@@ -108,7 +109,11 @@ def parse_arguments(argv=None, *, prepare=False) -> argparse.Namespace:
     parser.add_argument("--max-glucose-gap-hours", type=float, default=4.0)
     parser.add_argument("--min-hrv-coverage", type=float, default=0.80)
     parser.add_argument("--min-hrv-windows", type=int, default=6)
-    return parser.parse_args(argv)
+    return parser
+
+
+def parse_arguments(argv=None, *, prepare=False) -> argparse.Namespace:
+    return create_argument_parser(prepare=prepare).parse_args(argv)
 
 
 def validate_output_paths(raw_dir: Path, destinations: list[Path]) -> None:

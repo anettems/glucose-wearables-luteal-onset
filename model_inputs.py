@@ -1,4 +1,17 @@
-#### One-day features and training-only wearable replacement for the 14:00 protocol.
+#### Build the daily inputs for the original three-model comparison.
+#### Use the audited 2022 data to calculate two glucose summaries and three
+#### wearable summaries: sleeping heart rate, heart rate variability (HRV),
+#### and skin temperature. Glucose inputs are the median and coefficient of
+#### variation, which describes variability relative to the mean. HRV uses
+#### the natural logarithm of median RMSSD, a measure of beat-to-beat timing
+#### variation. Each prediction uses the previous calendar day's
+#### glucose and the main sleep ending by 14:00 on the prediction day.
+#### Keep the same participant-days for glucose-only, wearable-only and
+#### combined models, and check their labels, measurement quality and timing.
+#### Save the feature tables and a summary of the retained data. Missing
+#### wearable values stay blank here; a separate helper replaces them with
+#### medians calculated from training participants after the data are split.
+#### Personal deviations and trends are added in trend_analysis/features.py.
 
 import json
 from pathlib import Path
@@ -18,49 +31,68 @@ OUTCOMES = ["phase", "luteal_status", "exact_luteal_onset", "uncertain_luteal_en
 
 
 def glucose_features(glucose):
+    #### Summarise usable glucose readings and assign them to the next prediction day.
     usable = glucose.loc[prep.primary_records(glucose, "glucose_value")]
+
+    #### Calculate daily level and spread from the same usable readings.
     result = usable.groupby(prep.KEY).glucose_value.agg(
         glucose_median_mmol_l="median", mean="mean", sd="std").reset_index()
     #### pandas std uses the sample standard deviation (ddof=1).
     result["glucose_cv_percent"] = 100 * result.pop("sd") / result.pop("mean")
     result["day_in_study"] += 1  #### Calendar lag, never the preceding available row.
+
     return result
 
 
 def hrv_features(intervals):
+    #### Summarise valid sleep HRV intervals on the day that the main sleep ends.
     usable = intervals.loc[intervals["usable_in_main_sleep"]].copy()
     usable["day_in_study"] = usable["matched_sleep_end_day"].astype("int64")
     result = usable.groupby(prep.KEY).rmssd.median().rename("log_median_rmssd_ms")
+
+    #### Use the natural logarithm of median RMSSD to reduce its skew.
     return np.log(result).reset_index()
 
 
 def construct_features(eligible, glucose, intervals, temperature):
-    #### Keep invalid/unavailable summaries blank even when a source value exists.
+    #### Join the five measurements to eligible days, retaining their quality and timing checks.
     metadata = prep.KEY + OUTCOMES + ["prior_day_source_day", "sleeping_hr_source_day",
         "prediction_cutoff_seconds", "main_sleep_start_seconds", "main_sleep_end_seconds",
         "valid_wearable_count"] + WEARABLE_FLAGS
     result = eligible[metadata + ["sleeping_hr_bpm"]].copy()
     result = prep.join_daily(result, glucose_features(glucose))
     result = prep.join_daily(result, hrv_features(intervals))
+
+    #### Select temperature from the main sleep already approved during preparation.
     selected = temperature.loc[temperature.review_selected, prep.KEY + ["nightly_temperature"]]
     result = prep.join_daily(result, selected.rename(columns={"nightly_temperature": "skin_temperature_c"}))
+
+    #### Mask each wearable using its own quality flag and record which inputs remain missing.
     for column, flag in zip(WEARABLE_FEATURES, WEARABLE_FLAGS):
         result[column] = result[column].where(result[flag])
         result[column + "_missing"] = result[column].isna()
+
     result = result.sort_values(prep.KEY).reset_index(drop=True)
     validate_features(result)
+
     return result
 
 
 def validate_features(data):
+    #### Check that each row is a valid, uniquely identified 2022 prediction day.
     if data.empty:
         raise ValueError("The eligible feature table is empty")
+
+    #### Check all three identifiers before trusting joins or participant separation.
     for column in prep.KEY:
         values = pd.to_numeric(data[column], errors="coerce")
         if not (np.isfinite(values) & values.gt(0) & values.mod(1).eq(0)).all():
             raise ValueError(f"Invalid positive integer key: {column}")
+
     if data.duplicated(prep.KEY).any() or not data.study_interval.eq(2022).all():
         raise ValueError("Expected unique 2022 observation keys")
+
+    #### Check measurement availability separately from identifiers and labels.
     features = data[FEATURE_SETS["combined"]]
     if np.isinf(features.to_numpy(dtype=float)).any():
         raise ValueError("Infinite feature value")
@@ -72,9 +104,13 @@ def validate_features(data):
         raise ValueError("Wearable count disagrees with feature availability")
     if not data.luteal_status.isin([0, 1]).all():
         raise ValueError("Classification outcome must contain only binary 0/1 values")
+
+    #### Ensure observed wearable values agree with their recorded quality flags.
     for feature, flag in zip(WEARABLE_FEATURES, WEARABLE_FLAGS):
         if not data[feature].notna().eq(data[flag]).all():
             raise ValueError(f"Feature availability disagrees with quality flag: {feature}")
+
+    #### Verify the prior-day glucose lag and the sleep-end cutoff.
     if not data.prior_day_source_day.eq(data.day_in_study - 1).all():
         raise ValueError("Glucose must use the preceding calendar day")
     if not data.main_sleep_end_seconds.le(data.prediction_cutoff_seconds).all():
@@ -82,35 +118,45 @@ def validate_features(data):
 
 
 def replace_missing_wearables(training, evaluation):
-    #### Fit on training participants; return two filled copies and the fitted medians.
-    ####
-    #### Call separately for every validation split, then refit on development
-    #### participants before final testing. Select FEATURE_SETS columns for models.
-    #### No scaling, labels, IDs or missingness flags are added to the predictors.
+    #### Calculate wearable medians from training participants and apply them to both datasets.
+    #### Call separately for each validation split, then refit on development participants for
+    #### testing.
+    #### Return filled copies and the medians; do not add labels or missingness flags as
+    #### predictors.
     if training.empty or evaluation.empty:
         raise ValueError("Training and evaluation data must both be non-empty")
     if set(training.id) & set(evaluation.id):
         raise ValueError("Training and evaluation participants must be separate")
+
+    #### Check both datasets before calculating any replacement values.
     for data in (training, evaluation):
         validate_features(data)
+
+    #### Estimate replacement values from training participants only.
     medians = training[WEARABLE_FEATURES].median()
     if medians.isna().any():
         raise ValueError("A wearable feature has no observed training values")
     outputs = []
+
+    #### Fill separate copies with the same training medians, preserving the supplied tables.
     for data in (training, evaluation):
         result = data.copy()
         result[WEARABLE_FEATURES] = result[WEARABLE_FEATURES].fillna(medians)
         outputs.append(result)
+
     return outputs[0], outputs[1], medians
 
 
 def prepare_datasets(processed_dir, report_dir):
-    #### Build shared, unimputed features from the reproducible audit outputs.
+    #### Read the audited inputs, construct paired feature tables and record how they were
+    #### prepared.
     processed_dir, report_dir = Path(processed_dir), Path(report_dir)
     config_path = report_dir / "run_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if config.get("temporal_settings") != prep.temporal_settings():
         raise ValueError("Audit timing settings do not match the active protocol")
+
+    #### Read the shared eligible days and the signal-specific audited measurements.
     eligible = pd.read_csv(processed_dir / "eligible_observations_14_2022.csv")
     glucose = pd.read_csv(processed_dir / "glucose_2022_audited.csv")
     intervals = pd.read_csv(processed_dir / "hrv_sleep_alignment_2022.csv")
@@ -118,6 +164,8 @@ def prepare_datasets(processed_dir, report_dir):
     temperature = pd.read_csv(processed_dir / "computed_temperature_2022_audited.csv")
     sleep = prep.review_sleep_sessions(sleep, config["quality_review_settings"])
     temperature = prep.review_temperature_sessions(temperature, sleep)
+
+    #### Build and save the inputs before marking feature preparation as complete.
     data = construct_features(eligible, glucose, intervals, temperature)
     save_datasets(data, processed_dir, report_dir)
     config.update(features_ready=True, model_ready=False, feature_sets=FEATURE_SETS,
@@ -125,18 +173,28 @@ def prepare_datasets(processed_dir, report_dir):
                   feature_script_sha256=prep.file_sha256(Path(__file__)),
                   entry_point_sha256=prep.file_sha256(Path(__file__).with_name("main.py")))
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
     return data
 
 
 def save_datasets(data, processed_dir, report_dir):
+    #### Save identical observation keys for all input sets and describe the retained cohort.
     outputs = {"observations_2022.csv": data,
                "outcomes_2022.csv": data[prep.KEY + OUTCOMES]}
+
+    #### Select each model's predictors without changing the shared rows or their order.
     for name, features in FEATURE_SETS.items():
         outputs[f"{name}_features_2022.csv"] = data[prep.KEY + features]
+
+    #### Require fresh filenames before writing any of the paired datasets.
     if any((processed_dir / name).exists() for name in outputs):
         raise FileExistsError("Feature outputs already exist; choose a fresh output directory")
+
+    #### Write each feature and outcome table after checking that no output already exists.
     for name, frame in outputs.items():
         frame.to_csv(processed_dir / name, index=False)
+
+    #### Save the relevant exclusion stages and counts of missing wearable values.
     attrition = pd.read_csv(report_dir / "temporal_attrition.csv")
     stages = ["recognised_labels", "aligned_glucose", "aligned_main_sleep", "sufficient_wearables"]
     attrition.loc[attrition.stage.isin(stages)].to_csv(report_dir / "data_reduction.csv", index=False)
@@ -151,6 +209,7 @@ def save_datasets(data, processed_dir, report_dir):
 
 
 def dataset_readme(summary):
+    #### Describe the saved dataset and its timing, missing-value and interpretation rules.
     return f"""# Active analysis datasets: 14:00, one-day inputs, 2022 only
 
 {summary['participants']} participants; {summary['days']} days; {summary['luteal_days']} luteal days;

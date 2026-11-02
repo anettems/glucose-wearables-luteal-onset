@@ -1,9 +1,20 @@
-#### Audit of the mcPHASES 2022 exports.
-####
-#### Run from the thesis workspace: python code/preprocessing.py
-#### Requires pandas and NumPy. Confirmed glucose units are standardised to mmol/L;
-#### no model features or imputation are produced. Supplied phase labels are not
-#### independently validated outcomes.
+#### Audit and prepare the mcPHASES 2022 sensor and phase-label exports.
+#### Read the raw CSV files without modifying them. Check observation keys,
+#### duplicates, clock times and numeric values, and retain flags for review.
+#### Standardise glucose units using the recorded participant mapping, while
+#### preserving source values. This mapping has not been verified with the provider.
+#### Create a calendar-day grid so missing days stay visible, then derive
+#### luteal status and reference starts from the supplied phase labels.
+#### Optional quality reviews check glucose coverage and match sleeping heart
+#### rate, heart rate variability and skin temperature to valid main sleep.
+#### The temporal review aligns previous-day glucose and overnight wearables
+#### to a fixed 14:00 prediction cutoff and identifies eligible prediction days.
+#### Write audited tables under code/data/processed/ and reports under results/,
+#### using fresh output directories. No model fitting or missing-value replacement
+#### is performed here. Clock alignment and upload times remain assumptions;
+#### supplied phase labels are not independently confirmed biological outcomes.
+#### Run from the thesis workspace with python code/preprocessing.py;
+#### code/main.py also calls this module when preparing the analysis inputs.
 
 from __future__ import annotations
 
@@ -88,7 +99,7 @@ TABLE_SPECS = {
 
 
 def create_argument_parser(*, prepare=False) -> argparse.ArgumentParser:
-    #### Share input options with the primary analysis entry point.
+    #### Define the input paths, output paths and optional quality-review settings.
     workspace = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
         description=(
@@ -109,6 +120,8 @@ def create_argument_parser(*, prepare=False) -> argparse.ArgumentParser:
         "--report-dir", type=Path,
         default=workspace / ("results/primary_1400_2022" if prepare else "results/preprocessing_2022"),
     )
+
+    #### Expose optional diagnostic reviews separately from basic structural checks.
     parser.add_argument("--eligibility-review", action="store_true",
                         help="Also generate quality-rule evidence, effects and a decision log")
     parser.add_argument("--temporal-review", action="store_true",
@@ -117,15 +130,18 @@ def create_argument_parser(*, prepare=False) -> argparse.ArgumentParser:
     parser.add_argument("--max-glucose-gap-hours", type=float, default=4.0)
     parser.add_argument("--min-hrv-coverage", type=float, default=0.80)
     parser.add_argument("--min-hrv-windows", type=int, default=6)
+
     return parser
 
 
 def parse_arguments(argv=None, *, prepare=False) -> argparse.Namespace:
+    #### Read the command-line options using the shared preparation settings.
     return create_argument_parser(prepare=prepare).parse_args(argv)
 
 
 def validate_output_paths(raw_dir: Path, destinations: list[Path]) -> None:
-    #### Refuse raw-data writes, overlapping destinations and existing outputs.
+    #### Protect raw data and require separate, empty destinations for processed data and
+    #### reports.
     for destination in destinations:
         if destination == raw_dir or raw_dir in destination.parents:
             raise ValueError("Output directories must be outside the raw-data directory")
@@ -133,21 +149,29 @@ def validate_output_paths(raw_dir: Path, destinations: list[Path]) -> None:
             raise ValueError("Output directories must not contain the raw-data directory")
         if destination.exists() and any(destination.iterdir()):
             raise FileExistsError(f"Output directory is not empty: {destination}")
+
+    #### Prevent the processed-data and report directories from containing each other.
     first, second = destinations
     if first == second or first in second.parents or second in first.parents:
         raise ValueError("Processed and report directories must be separate")
 
 
 def validate_integer_column(data: pd.DataFrame, column: str) -> None:
+    #### Require positive whole-number identifiers and study days before converting their type.
     values = pd.to_numeric(data[column], errors="coerce")
     valid = values.notna() & np.isfinite(values) & values.gt(0) & values.mod(1).eq(0)
     if not valid.all():
         raise ValueError(f"Invalid positive integer key in {column}: {int((~valid).sum())} rows")
+
+    #### Convert identifiers only after every value has passed validation.
     data[column] = values.astype("int64")
 
 
 def required_columns(spec: dict) -> set[str]:
+    #### List the columns required for a daily, timestamped or sleep-session export.
     columns = set(KEY + spec["values"])
+
+    #### Session exports identify start and end days instead of a single measurement day.
     if spec.get("session"):
         columns.remove("day_in_study")
         columns.update([
@@ -156,10 +180,13 @@ def required_columns(spec: dict) -> set[str]:
         ])
     if "timestamp" in spec:
         columns.add(spec["timestamp"])
+
     return columns
 
 
 def load_2022(path: Path, spec: dict) -> tuple[pd.DataFrame, int]:
+    #### Check required columns, retain 2022 records and validate their identifiers and study
+    #### days.
     data = pd.read_csv(path, low_memory=False)
     required = required_columns(spec)
     if path.stem == "hormones_and_selfreport":
@@ -169,42 +196,59 @@ def load_2022(path: Path, spec: dict) -> tuple[pd.DataFrame, int]:
     missing = required.difference(data.columns)
     if missing:
         raise ValueError(f"{path.name}: missing columns {sorted(missing)}")
+
+    #### Filter the collection interval before validating participant and day keys.
     intervals = pd.to_numeric(data["study_interval"], errors="coerce")
     if intervals.isna().any() or not np.isfinite(intervals).all():
         raise ValueError(f"{path.name}: invalid study_interval values")
     selected = data.loc[intervals.eq(STUDY_INTERVAL)].copy()
     excluded_rows = len(data) - len(selected)
+
+    #### Assign sessions to their end day while retaining both original day fields.
     day_columns = ["day_in_study"]
     if spec.get("session"):
         day_columns = ["sleep_start_day_in_study", "sleep_end_day_in_study"]
+
+    #### Validate identifiers only after excluding records from other collection intervals.
     for column in PARTICIPANT_KEY + day_columns:
         validate_integer_column(selected, column)
+
     if spec.get("session"):
         selected["day_in_study"] = selected["sleep_end_day_in_study"]
+
     return selected, excluded_rows
 
 
 def clock_seconds(values: pd.Series) -> pd.Series:
-    #### Reject dates, durations and timezone strings: the exports contain clocks.
+    #### Convert clock times to seconds since midnight, rejecting dates, durations and timezone
+    #### strings.
     pattern = r"\d{2}:\d{2}:\d{2}(?:\.\d+)?"
     text = values.astype("string")
     valid_format = text.str.fullmatch(pattern, na=False)
     seconds = pd.to_timedelta(text.where(valid_format), errors="coerce").dt.total_seconds()
+
+    #### Check each clock component because a duration parser can accept times beyond midnight.
     parts = text.str.extract(r"^(\d{2}):(\d{2}):(\d{2})")
     components = parts.apply(pd.to_numeric, errors="coerce")
     valid_clock = components[0].lt(24) & components[1].lt(60) & components[2].lt(60)
+
     return seconds.where(valid_clock & seconds.ge(0) & seconds.lt(SECONDS_PER_DAY))
 
 
 def add_timing(data: pd.DataFrame, spec: dict) -> pd.DataFrame:
+    #### Place measurement times on the relative study-day axis and flag invalid intervals.
     data = data.copy()
     data["audit_invalid_time"] = False
+
+    #### Point measurements use their exported clock; HRV timestamps mark interval starts.
     if "timestamp" in spec:
         seconds = clock_seconds(data[spec["timestamp"]])
         data["audit_end_seconds"] = data["day_in_study"] * SECONDS_PER_DAY + seconds
         if "rmssd" in spec["values"]:
             data["audit_end_seconds"] += CGM_INTERVAL_SECONDS
         data["audit_invalid_time"] = seconds.isna()
+
+    #### Check session order on the full study-day axis, including sleeps crossing midnight.
     if spec.get("session"):
         start = clock_seconds(data["sleep_start_timestamp"])
         end = clock_seconds(data["sleep_end_timestamp"])
@@ -212,10 +256,13 @@ def add_timing(data: pd.DataFrame, spec: dict) -> pd.DataFrame:
         data["audit_end_seconds"] = data["sleep_end_day_in_study"] * SECONDS_PER_DAY + end
         data["audit_invalid_time"] = start.isna() | end.isna()
         data["audit_invalid_time"] |= data["audit_end_seconds"].le(data["audit_start_seconds"])
+
     return data
 
 
 def measurement_key(spec: dict) -> list[str]:
+    #### Define the fields that identify one measurement, accounting for sessions and
+    #### temperature type.
     if spec.get("session"):
         columns = PARTICIPANT_KEY + [
             "sleep_start_day_in_study", "sleep_start_timestamp",
@@ -228,9 +275,12 @@ def measurement_key(spec: dict) -> list[str]:
 
 
 def add_numeric_checks(data: pd.DataFrame, spec: dict) -> tuple[pd.DataFrame, list[dict]]:
+    #### Record missing values and flag invalid numeric content separately for each signal.
     data = data.copy()
     data["audit_invalid_value"] = False
     checks = []
+
+    #### Apply each signal's allowed numeric range and retain per-column error counts.
     for column in spec["values"]:
         values = pd.to_numeric(data[column], errors="coerce")
         invalid = data[column].notna() & (values.isna() | ~np.isfinite(values))
@@ -243,24 +293,36 @@ def add_numeric_checks(data: pd.DataFrame, spec: dict) -> tuple[pd.DataFrame, li
             invalid = data[column].notna() & (values.isna() | ~np.isfinite(values))
         data["audit_invalid_value"] |= invalid
         data[f"audit_invalid_{column}"] = invalid
+
+        #### Record missing and invalid counts separately for each signal.
         checks.append({"column": column, "missing_rows": int(data[column].isna().sum()),
                        "invalid_rows": int(invalid.sum())})
+
     return data, checks
 
 
 def audit_table(raw_dir: Path, name: str, spec: dict) -> tuple[pd.DataFrame, dict, list[dict]]:
+    #### Audit one export, remove exact duplicates and retain conflicts as flagged rows for
+    #### review.
     data, excluded_rows = load_2022(raw_dir / f"{name}.csv", spec)
     input_rows = len(data)
     data = data.drop_duplicates().copy()
     duplicates_removed = input_rows - len(data)
     data["audit_conflicting_key"] = data.duplicated(measurement_key(spec), keep=False)
+
+    #### Check timing and numeric values before any glucose unit conversion.
     data = add_timing(data, spec)
     data, checks = add_numeric_checks(data, spec)
     if name == "glucose":
         data = standardise_glucose_units(data)
+
+    #### Only rows passing all structural checks contribute to usable-record counts.
     data["audit_structurally_usable"] = ~data[[
         "audit_conflicting_key", "audit_invalid_time", "audit_invalid_value",
     ]].any(axis=1)
+
+    #### Record exclusions and problems without discarding conflicting measurements from the
+    #### audit.
     summary = {
         "table": name, "rows_2022_before_deduplication": input_rows,
         "excluded_other_interval_rows": excluded_rows,
@@ -272,10 +334,13 @@ def audit_table(raw_dir: Path, name: str, spec: dict) -> tuple[pd.DataFrame, dic
     }
     if "coverage" in data:
         summary["hrv_coverage_above_one_rows"] = int(pd.to_numeric(data["coverage"], errors="coerce").gt(1).sum())
+
     return data.sort_values(measurement_key(spec)).reset_index(drop=True), summary, checks
 
 
 def glucose_unit_policy() -> dict:
+    #### Record the glucose conversion mapping and its source, including the verification
+    #### limitation.
     return {"mg_dl_participants": list(MG_DL_GLUCOSE_IDS), "target_unit": "mmol/L",
             "mg_dl_to_mmol_l_multiplier": MG_DL_TO_MMOL_L,
             "confirmation_source": "User confirmed mg/dL for participants 6 and 11 in this project conversation",
@@ -286,9 +351,12 @@ def glucose_unit_policy() -> dict:
 
 
 def standardise_glucose_units(data: pd.DataFrame) -> pd.DataFrame:
-    #### Apply the confirmed participant mapping once, after checking source values.
+    #### Convert glucose once using the recorded participant mapping and preserve its source
+    #### scale.
     if "glucose_source_value" in data:
         raise ValueError("Glucose units have already been standardised; read the raw export")
+
+    #### Preserve original values, units and the exact conversion factor for each record.
     result = data.copy()
     converted = result["id"].isin(MG_DL_GLUCOSE_IDS) & result["study_interval"].eq(STUDY_INTERVAL)
     result["glucose_source_value"] = result["glucose_value"]
@@ -298,28 +366,37 @@ def standardise_glucose_units(data: pd.DataFrame) -> pd.DataFrame:
     result["glucose_conversion_factor"] = np.where(converted, MG_DL_TO_MMOL_L, 1.0)
     result["glucose_value"] = pd.to_numeric(result["glucose_source_value"], errors="coerce")
     result["glucose_value"] *= result["glucose_conversion_factor"]
+
     return result
 
 
 def create_daily_grid(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    #### Include every calendar day between each participant's earliest and latest audited
+    #### records.
     observed = pd.concat([data[KEY] for data in tables.values()], ignore_index=True)
     spans = observed.groupby(PARTICIPANT_KEY)["day_in_study"].agg(["min", "max"])
+
+    #### Expand each observed recording span so a missing day cannot be skipped in later joins.
     grids = [pd.DataFrame({"id": participant, "study_interval": interval,
                           "day_in_study": range(int(span["min"]), int(span["max"]) + 1)})
              for (participant, interval), span in spans.iterrows()]
     if not grids:
         raise ValueError("No 2022 records were found in the audited tables")
+
     return pd.concat(grids, ignore_index=True).sort_values(KEY).reset_index(drop=True)
 
 
 def join_daily(grid: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
+    #### Join one daily table without adding, removing or duplicating observation keys.
     result = grid.merge(daily, on=KEY, how="left", validate="one_to_one")
     if len(result) != len(grid) or result.duplicated(KEY).any():
         raise AssertionError("Daily join changed observation keys")
+
     return result
 
 
 def add_labels(grid: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
+    #### Derive daily luteal status and reference starts from unambiguous supplied phase labels.
     labels = labels.copy()
     labels["phase"] = labels["phase"].astype("string").str.strip().str.lower().replace("", pd.NA)
     labels["audit_unknown_phase"] = labels["phase"].notna() & ~labels["phase"].isin(PHASES)
@@ -328,58 +405,82 @@ def add_labels(grid: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
     daily = join_daily(grid, reliable[KEY + ["phase"]]).sort_values(KEY).reset_index(drop=True)
     daily["label_record_present"] = pd.MultiIndex.from_frame(daily[KEY]).isin(
         pd.MultiIndex.from_frame(labels[KEY]))
+
+    #### The complete grid makes this the preceding calendar day, even when its label is
+    #### missing.
     previous = daily.groupby(PARTICIPANT_KEY)["phase"].shift()
     known = daily["phase"].notna() & previous.notna()
     daily["luteal_status"] = daily["phase"].eq("luteal").astype("Int64").where(daily["phase"].notna())
     daily["exact_luteal_onset"] = (daily["phase"].eq("luteal") & previous.ne("luteal")).astype("Int64").where(known)
     daily["uncertain_luteal_entry"] = daily["phase"].eq("luteal").fillna(False) & previous.isna()
+
     return daily
 
 
 def daily_record_counts(data: pd.DataFrame, name: str) -> pd.DataFrame:
+    #### Count all records and structurally usable measurements for each participant-day.
     primary = TABLE_SPECS[name]["values"][0]
     available = data["audit_structurally_usable"] & data[primary].notna()
+
+    #### Keep total, usable and flagged record counts in separate columns.
     counts = data.assign(_available=available).groupby(KEY).agg(
         records=("id", "size"), available_records=("_available", "sum"),
         conflicting_rows=("audit_conflicting_key", "sum"),
         invalid_time_rows=("audit_invalid_time", "sum"),
         invalid_value_rows=("audit_invalid_value", "sum"),
     )
+
     return counts.add_prefix(f"{name}_").reset_index()
 
 
 def glucose_day_coverage(seconds: np.ndarray) -> dict:
-    #### Describe coverage using nominal forward five-minute intervals, clipped at midnight.
+    #### Estimate observed time using five-minute intervals after readings, clipped at midnight.
     seconds = np.sort(np.unique(seconds))
     if not len(seconds):
         return {"glucose_nominal_observed_seconds": 0.0,
                 "glucose_nominal_coverage_fraction": 0.0,
                 "glucose_longest_uncovered_seconds": float(SECONDS_PER_DAY)}
+
+    #### Count overlapping five-minute intervals only once when estimating observed time.
     ends = np.minimum(seconds + CGM_INTERVAL_SECONDS, SECONDS_PER_DAY)
     previous_ends = np.r_[0.0, np.maximum.accumulate(ends)[:-1]]
     observed = np.maximum(0, ends - np.maximum(seconds, previous_ends)).sum()
+
+    #### Include uncovered time at both day boundaries in the longest-gap measure.
     gaps = np.r_[np.maximum(0, seconds - previous_ends), SECONDS_PER_DAY - ends[-1]]
+
     return {"glucose_nominal_observed_seconds": float(observed),
             "glucose_nominal_coverage_fraction": float(observed / SECONDS_PER_DAY),
             "glucose_longest_uncovered_seconds": float(gaps.max())}
 
 
 def glucose_coverage(data: pd.DataFrame) -> pd.DataFrame:
+    #### Calculate daily recording coverage from structurally usable, nonmissing glucose
+    #### readings.
     valid = data.loc[data["audit_structurally_usable"] & data["glucose_value"].notna()]
     records = []
+
+    #### Calculate within-day reading times separately for each participant-day.
     for key, group in valid.groupby(KEY):
         seconds = group["audit_end_seconds"].to_numpy() % SECONDS_PER_DAY
         records.append(dict(zip(KEY, key)) | glucose_day_diagnostics(seconds))
+
     columns = KEY + list(glucose_day_diagnostics(np.array([])))
+
     return pd.DataFrame(records, columns=columns)
 
 
 def glucose_day_diagnostics(seconds: np.ndarray) -> dict:
+    #### Describe reading counts, spacing and gaps alongside nominal observed-time coverage.
     seconds = np.sort(np.unique(seconds))
     result = glucose_day_coverage(seconds)
+
+    #### Distinguish spacing between readings from uncovered time after nominal five-minute
+    #### intervals.
     gaps = np.diff(seconds)
     uncovered = np.maximum(0, gaps - CGM_INTERVAL_SECONDS)
     boundary = float(seconds[0] + max(0, SECONDS_PER_DAY - seconds[-1] - CGM_INTERVAL_SECONDS)) if len(seconds) else float(SECONDS_PER_DAY)
+
     return result | {
         "glucose_unique_samples": len(seconds),
         "glucose_occupied_5min_bins": len(np.unique(seconds // CGM_INTERVAL_SECONDS)),
@@ -394,6 +495,7 @@ def glucose_day_diagnostics(seconds: np.ndarray) -> dict:
 
 
 def eligibility_settings(args: argparse.Namespace) -> dict:
+    #### Collect the quality thresholds and reject settings outside their allowed ranges.
     settings = {
         "min_glucose_coverage": getattr(args, "min_glucose_coverage", 0.70),
         "max_glucose_gap_hours": getattr(args, "max_glucose_gap_hours", 4.0),
@@ -402,26 +504,39 @@ def eligibility_settings(args: argparse.Namespace) -> dict:
         "unresolved_glucose_ids": list(UNRESOLVED_GLUCOSE_IDS),
         "sleep_duration_tolerance_seconds": 60,
     }
+
+    #### Require coverage fractions to fall between zero and one.
     for name in ["min_glucose_coverage", "min_hrv_coverage"]:
         if not np.isfinite(settings[name]) or not 0 <= settings[name] <= 1:
             raise ValueError(f"{name} must be finite and between zero and one")
+
     if not np.isfinite(settings["max_glucose_gap_hours"]) or not 0 <= settings["max_glucose_gap_hours"] <= 24:
         raise ValueError("max_glucose_gap_hours must be finite and between zero and 24")
+
+    #### Require a positive whole-number minimum for the number of usable HRV intervals.
     windows = settings["min_hrv_windows"]
     if not np.isfinite(windows) or windows < 1 or int(windows) != windows:
         raise ValueError("min_hrv_windows must be a positive integer")
+
     return settings
 
 
 def primary_records(data: pd.DataFrame, column: str) -> pd.Series:
+    #### Identify rows with a structurally usable record and an observed value for the chosen
+    #### signal.
     return data["audit_structurally_usable"] & data[column].notna()
 
 
 def hrv_quality_counts(data: pd.DataFrame, settings: dict) -> pd.DataFrame:
+    #### Count HRV intervals passing the coverage rule, with separate diagnostics for coverage
+    #### above one.
     coverage = pd.to_numeric(data["coverage"], errors="coerce")
     usable = primary_records(data, "rmssd") & coverage.ge(settings["min_hrv_coverage"])
+
+    #### Keep coverage above one visible without automatically excluding those intervals.
     quality = data.assign(_usable=usable, _bounded=usable & coverage.le(1),
                           _above_one=coverage.gt(1))
+
     return quality.groupby(KEY).agg(
         hrv_quality_windows=("_usable", "sum"),
         hrv_bounded_quality_windows=("_bounded", "sum"),
@@ -430,37 +545,50 @@ def hrv_quality_counts(data: pd.DataFrame, settings: dict) -> pd.DataFrame:
 
 
 def overlapping_session_flags(data: pd.DataFrame, candidates: pd.Series) -> pd.Series:
-    #### Flag both members of overlapping main sessions, including across end days.
+    #### Flag both sessions when candidate main sleeps overlap, including across calendar days.
     flags = pd.Series(False, index=data.index)
+
+    #### Compare sessions only within the same participant and collection interval.
     for _, group in data.loc[candidates].groupby(PARTICIPANT_KEY):
+        #### Track earlier candidate sessions whose end times may overlap the next session.
         active = {}
+
+        #### Visit sessions in time order and retain earlier sessions that have not yet ended.
         for index, row in group.sort_values("audit_start_seconds").iterrows():
             active = {key: end for key, end in active.items() if end > row["audit_start_seconds"]}
             if active:
                 flags.loc[list(active)] = True
                 flags.loc[index] = True
             active[index] = row["audit_end_seconds"]
+
     return flags
 
 
 def review_sleep_sessions(data: pd.DataFrame, settings: dict) -> pd.DataFrame:
+    #### Select a single valid main sleep per end day after duration and overlap checks.
     data = data.copy()
     if "mainsleep" not in data:
         raise ValueError("Eligibility review requires the sleep mainsleep field")
+
+    #### Convert the exported main-sleep flag and compare elapsed time with duration in
+    #### milliseconds.
     data["review_main_sleep"] = data["mainsleep"].astype("string").str.lower().eq("true").fillna(False)
     elapsed = data["audit_end_seconds"] - data["audit_start_seconds"]
     data["review_duration_discrepancy_seconds"] = (elapsed - pd.to_numeric(data["duration"], errors="coerce") / 1000).abs()
     duration_ok = data["review_duration_discrepancy_seconds"].le(settings["sleep_duration_tolerance_seconds"])
+
+    #### Retain only one structurally valid, non-overlapping main session per end day.
     candidate = primary_records(data, "duration") & data["review_main_sleep"] & duration_ok
     data["review_main_sessions_on_end_day"] = candidate.groupby([data[column] for column in KEY]).transform("sum")
     data["review_overlapping_main_sleep"] = overlapping_session_flags(data, candidate)
     data["review_selected"] = candidate & data["review_main_sessions_on_end_day"].eq(1)
     data["review_selected"] &= ~data["review_overlapping_main_sleep"]
+
     return data
 
 
 def review_sleeping_heart_rate(data: pd.DataFrame, sleep: pd.DataFrame) -> pd.DataFrame:
-    #### Use exact session ends; naps, ambiguous ends and unmatched scores are excluded.
+    #### Match sleep-score heart rate to an exact, unambiguous selected main-sleep end.
     keys = KEY + ["audit_end_seconds"]
     ends = sleep.groupby(keys).agg(
         matched_sleep_sessions=("id", "size"),
@@ -470,9 +598,13 @@ def review_sleeping_heart_rate(data: pd.DataFrame, sleep: pd.DataFrame) -> pd.Da
     result = data.merge(ends, on=keys, how="left", validate="many_to_one")
     counts = ["matched_sleep_sessions", "matched_main_sessions", "matched_selected_sessions"]
     result[counts] = result[counts].fillna(0).astype(int)
+
+    #### Require exactly one matching sleep and exactly one selected main sleep.
     unique = result["matched_sleep_sessions"].eq(1)
     selected = result["matched_selected_sessions"].eq(1)
     result["review_selected"] = primary_records(result, "resting_heart_rate") & unique & selected
+
+    #### Retain an explicit reason when a sleep-score record cannot be selected.
     result["review_match_status"] = np.select(
         [result["matched_sleep_sessions"].eq(0), ~unique,
          result["matched_main_sessions"].eq(0), ~selected,
@@ -481,42 +613,55 @@ def review_sleeping_heart_rate(data: pd.DataFrame, sleep: pd.DataFrame) -> pd.Da
         default="selected_main_sleep",
     )
     result["sleeping_hr_bpm"] = pd.to_numeric(result["resting_heart_rate"], errors="coerce")
+
+    #### Add timing-difference diagnostics without using them to accept approximate matches.
     main = sleep.loc[sleep["review_selected"], KEY + ["audit_end_seconds"]].rename(
         columns={"audit_end_seconds": "selected_main_sleep_end_seconds"})
     result = join_daily_scores_to_main(result, main)
+
     return result
 
 
 def join_daily_scores_to_main(scores: pd.DataFrame, main: pd.DataFrame) -> pd.DataFrame:
-    #### Retain end-time discrepancies as diagnostics, never as matching tolerances.
+    #### Retain sleep-score timing differences as diagnostics, without relaxing the exact-match
+    #### rule.
     result = scores.merge(main, on=KEY, how="left", validate="many_to_one")
     result["score_minus_main_end_seconds"] = (
         result["audit_end_seconds"] - result["selected_main_sleep_end_seconds"])
+
     return result
 
 
 def sleeping_hr_daily(scores: pd.DataFrame) -> pd.DataFrame:
+    #### Keep selected sleeping heart rate and its source timestamp as a daily table.
     selected = scores.loc[scores["review_selected"], KEY + ["sleeping_hr_bpm", "timestamp"]]
     return selected.rename(columns={"timestamp": "sleeping_hr_source_timestamp"}).assign(
         quality_sleeping_hr=True)
 
 
 def review_temperature_sessions(data: pd.DataFrame, sleep: pd.DataFrame) -> pd.DataFrame:
+    #### Select skin temperature with valid sample counts and an exact selected-sleep match.
     data = data.copy()
     session_key = PARTICIPANT_KEY + ["audit_start_seconds", "audit_end_seconds"]
     main = sleep.loc[sleep["review_selected"], session_key].assign(_main_match=True)
     data = data.merge(main, on=session_key, how="left", validate="many_to_one")
     data["review_matches_selected_main_sleep"] = data.pop("_main_match").fillna(False).astype(bool)
+
+    #### Require skin measurements, positive whole-number sample counts and one candidate per
+    #### day.
     samples = pd.to_numeric(data["temperature_samples"], errors="coerce")
     candidate = primary_records(data, "nightly_temperature") & samples.gt(0) & samples.mod(1).eq(0)
     candidate &= data["type"].astype("string").str.upper().eq("SKIN").fillna(False)
     candidate &= data["review_matches_selected_main_sleep"]
     count = candidate.groupby([data[column] for column in KEY]).transform("sum")
     data["review_selected"] = candidate & count.eq(1)
+
     return data
 
 
 def session_diagnostics(data: pd.DataFrame, table: str) -> pd.DataFrame:
+    #### Collect session timing and selection details for reviewing sleep and temperature
+    #### records.
     columns = KEY + ["sleep_start_day_in_study", "sleep_start_timestamp",
                      "sleep_end_day_in_study", "sleep_end_timestamp",
                      "audit_start_seconds", "audit_end_seconds", "audit_invalid_time"]
@@ -526,15 +671,20 @@ def session_diagnostics(data: pd.DataFrame, table: str) -> pd.DataFrame:
     result["cross_midnight"] = result["sleep_end_day_in_study"].gt(result["sleep_start_day_in_study"])
     result["sessions_on_end_day"] = data.groupby(KEY)["id"].transform("size")
     result["end_clock_seconds"] = result["audit_end_seconds"] % SECONDS_PER_DAY
+
     return result
 
 
 def phase_transition_review(daily: pd.DataFrame) -> pd.DataFrame:
+    #### Separate exact supplied-label starts from entries whose timing is uncertain after
+    #### missing labels.
     data = daily[KEY + ["phase", "exact_luteal_onset", "uncertain_luteal_entry"]].copy()
     known_day = data["day_in_study"].where(data["phase"].notna())
     grouping = [data[column] for column in PARTICIPANT_KEY]
     data["previous_known_phase"] = data["phase"].groupby(grouping).ffill().groupby(grouping).shift()
     data["previous_known_day"] = known_day.groupby(grouping).ffill().groupby(grouping).shift()
+
+    #### Keep exact starts and uncertain luteal entries for separate review.
     candidate = data["exact_luteal_onset"].eq(1).fillna(False) | data["uncertain_luteal_entry"]
     data = data.loc[candidate].copy()
     data["transition_status"] = "exact"
@@ -542,6 +692,8 @@ def phase_transition_review(daily: pd.DataFrame) -> pd.DataFrame:
     previous = data["previous_known_phase"]
     data.loc[uncertain & previous.isna(), "transition_status"] = "left_censored"
     data.loc[uncertain & previous.eq("luteal").fillna(False), "transition_status"] = "possible_continuation"
+
+    #### After a known non-luteal label and a gap, the start is only bounded by two dates.
     interval = uncertain & previous.notna() & previous.ne("luteal").fillna(False)
     data.loc[interval, "transition_status"] = "interval_censored"
     data["earliest_onset_day"] = data["day_in_study"].astype("Int64")
@@ -549,14 +701,18 @@ def phase_transition_review(daily: pd.DataFrame) -> pd.DataFrame:
     data.loc[uncertain & ~interval, "earliest_onset_day"] = pd.NA
     data["latest_onset_day"] = data["day_in_study"].astype("Int64")
     data.loc[data["transition_status"].eq("possible_continuation"), "latest_onset_day"] = pd.NA
+
     return data.reset_index(drop=True)
 
 
 def selected_day_flag(data: pd.DataFrame, column: str) -> pd.DataFrame:
+    #### Mark a day as available when it has at least one selected session.
     return data.groupby(KEY)["review_selected"].any().rename(column).reset_index()
 
 
 def temporal_settings() -> dict:
+    #### Record the fixed prediction timing and the unverified clock and availability
+    #### assumptions.
     return {"prediction_cutoff": f"{PRIMARY_CUTOFF_HOUR:02d}:00:00",
             "history_calendar_days": 1, "required_history_days": 1,
             "minimum_wearable_signals": MIN_WEARABLE_SIGNALS,
@@ -573,13 +729,18 @@ def temporal_settings() -> dict:
 
 def align_hrv_to_sleep(data: pd.DataFrame, sleep: pd.DataFrame,
                        settings: dict) -> pd.DataFrame:
-    #### Match whole five-minute intervals to selected, non-overlapping main sleep.
+    #### Match complete five-minute HRV intervals to selected main sleeps and apply the coverage
+    #### rule.
     columns = KEY + ["timestamp", "rmssd", "coverage", "audit_end_seconds",
                      "audit_structurally_usable"]
     result = data[columns].copy().reset_index(drop=True)
     result["audit_start_seconds"] = result["audit_end_seconds"] - CGM_INTERVAL_SECONDS
     result["matched_sleep_end_day"] = pd.Series(pd.NA, index=result.index, dtype="Int64")
+
+    #### Use only sleeps already accepted by the main-sleep quality review.
     selected = sleep.loc[sleep["review_selected"]]
+
+    #### Match each participant's intervals only against that participant's selected sleeps.
     for key, indices in result.groupby(PARTICIPANT_KEY).indices.items():
         sessions = selected.loc[selected["id"].eq(key[0]) & selected["study_interval"].eq(key[1])]
         sessions = sessions.sort_values("audit_start_seconds")
@@ -587,53 +748,70 @@ def align_hrv_to_sleep(data: pd.DataFrame, sleep: pd.DataFrame,
             continue
         starts = result.loc[indices, "audit_start_seconds"].to_numpy()
         ends = result.loc[indices, "audit_end_seconds"].to_numpy()
+
+        #### Find the latest sleep starting before each interval, then require the whole
+        #### interval to fit.
         positions = np.searchsorted(sessions["audit_start_seconds"].to_numpy(), starts, side="right") - 1
         clipped = np.maximum(positions, 0)
         matched = (positions >= 0) & np.isfinite(starts) & np.isfinite(ends)
         matched &= ends <= sessions["audit_end_seconds"].to_numpy()[clipped]
         days = sessions["day_in_study"].to_numpy()[clipped]
         result.loc[indices[matched], "matched_sleep_end_day"] = days[matched]
+
+    #### Keep sleep matching and HRV measurement quality as separate checks.
     result["matched_main_sleep"] = result["matched_sleep_end_day"].notna()
     coverage = pd.to_numeric(result["coverage"], errors="coerce")
     result["usable_in_main_sleep"] = primary_records(result, "rmssd") & result["matched_main_sleep"]
     result["usable_in_main_sleep"] &= coverage.ge(settings["min_hrv_coverage"])
+
     return result
 
 
 def sleep_hrv_counts(intervals: pd.DataFrame) -> pd.DataFrame:
+    #### Count usable HRV intervals on the day their matched main sleep ends.
     matched = intervals.loc[intervals["matched_main_sleep"]].copy()
     matched["day_in_study"] = matched["matched_sleep_end_day"].astype("int64")
+
     return matched.groupby(KEY)["usable_in_main_sleep"].sum().rename(
         "hrv_main_sleep_quality_windows").reset_index()
 
 
 def lag_daily_columns(daily: pd.DataFrame, columns: dict) -> pd.DataFrame:
-    #### Join by the preceding calendar day, never by the preceding available row.
+    #### Align values by the preceding calendar day, rather than the preceding available row.
     result = daily[KEY + list(columns)].rename(columns=columns).copy()
     result["day_in_study"] += 1
+
     return result
 
 
 def add_calendar_history(daily: pd.DataFrame) -> pd.DataFrame:
-    #### Legacy three-day extension helper; not used by the primary protocol.
+    #### Retain the legacy three-day availability calculation; the primary protocol does not
+    #### call it.
     result = daily.copy()
     result["history_usable_days"] = 0
+
+    #### Join each exact calendar lag without bridging missing days.
     for lag in range(3):
         previous = daily[KEY + ["aligned_inputs_available"]].copy()
         previous["day_in_study"] += lag
         previous = previous.rename(columns={"aligned_inputs_available": "_history_usable"})
         result = join_daily(result, previous)
         result["history_usable_days"] += result.pop("_history_usable").fillna(False).astype(int)
+
     #### Historical phase labels are not predictors and need not be present.
+    #### This legacy check uses label information only for the prediction day.
     result["eligible_prediction"] = result["history_usable_days"].eq(3) & result["phase"].notna()
     result["history_first_aligned_day"] = result["day_in_study"] - 2
     result["history_first_glucose_day"] = result["day_in_study"] - 3
+
     return result
 
 
 def aligned_prediction_days(quality: pd.DataFrame, sleep: pd.DataFrame,
                          temperature: pd.DataFrame, intervals: pd.DataFrame,
                          settings: dict, cutoff_hour: int) -> pd.DataFrame:
+    #### Align prior-day glucose and selected overnight wearables to each day's prediction
+    #### cutoff.
     columns = KEY + ["phase", "luteal_status", "exact_luteal_onset",
                      "uncertain_luteal_entry", "quality_units_accepted"]
     result = quality[columns].copy()
@@ -642,15 +820,21 @@ def aligned_prediction_days(quality: pd.DataFrame, sleep: pd.DataFrame,
     result = join_daily(result, lag_daily_columns(quality, glucose))
     result = join_daily(result, quality[KEY + ["quality_sleeping_hr", "sleeping_hr_bpm",
                                                "sleeping_hr_source_timestamp"]])
+
+    #### Join the selected sleep's times before applying the prediction cutoff.
     selected = sleep.loc[sleep["review_selected"], KEY + ["audit_start_seconds", "audit_end_seconds"]]
     result = join_daily(result, selected.rename(columns={"audit_start_seconds": "main_sleep_start_seconds",
                                                        "audit_end_seconds": "main_sleep_end_seconds"}))
+
+    #### Place the 14:00 cutoff on the same study-day time axis as the measurements.
     result["prediction_cutoff_seconds"] = result["day_in_study"] * SECONDS_PER_DAY + cutoff_hour * 3600
     result["prior_day_source_day"] = result["day_in_study"] - 1
     result["aligned_main_sleep"] = result["main_sleep_end_seconds"].le(result["prediction_cutoff_seconds"])
     result["sleeping_hr_source_day"] = result["day_in_study"]
     result["aligned_sleeping_hr"] = result.pop("quality_sleeping_hr").fillna(False).astype(bool)
     result["aligned_sleeping_hr"] &= result["aligned_main_sleep"]
+
+    #### Require sufficient valid HRV intervals inside the selected sleep.
     result = join_daily(result, sleep_hrv_counts(intervals))
     result["hrv_main_sleep_quality_windows"] = result["hrv_main_sleep_quality_windows"].fillna(0).astype(int)
     result["aligned_hrv"] = result["hrv_main_sleep_quality_windows"].ge(settings["min_hrv_windows"])
@@ -658,34 +842,45 @@ def aligned_prediction_days(quality: pd.DataFrame, sleep: pd.DataFrame,
     result = join_daily(result, selected_day_flag(temperature, "_matched_temperature"))
     result["aligned_temperature"] = result.pop("_matched_temperature").fillna(False).astype(bool)
     result["aligned_temperature"] &= result["aligned_main_sleep"]
+
+    #### Treat absent quality flags as unavailable rather than assuming a valid measurement.
     flags = ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep", "aligned_sleeping_hr",
              "aligned_hrv", "aligned_temperature"]
     result[flags] = result[flags].fillna(False).astype(bool)
+
     return apply_prediction_requirements(result)
 
 
 def apply_prediction_requirements(daily: pd.DataFrame) -> pd.DataFrame:
-    #### Keep one-day inputs; a missing wearable does not invalidate the other two.
+    #### Require valid glucose, main sleep, at least two wearables and a known phase label.
     result = daily.copy()
     wearables = ["aligned_sleeping_hr", "aligned_hrv", "aligned_temperature"]
     result["valid_wearable_count"] = result[wearables].sum(axis=1)
     result["sufficient_wearables"] = result["valid_wearable_count"].ge(MIN_WEARABLE_SIGNALS)
+
+    #### Keep input availability separate from whether the target day's label is known.
     required = ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep", "sufficient_wearables"]
     result["aligned_inputs_available"] = result[required].all(axis=1)
     result["eligible_prediction"] = result["aligned_inputs_available"] & result["phase"].notna()
+
     return result
 
 
 def temporal_attrition(daily: pd.DataFrame, cutoff_hour: int) -> pd.DataFrame:
+    #### Count the days retained as each prediction-time requirement is added in sequence.
     mask = daily["phase"].notna()
     rows = [{"stage": "recognised_labels", **availability_counts(daily, mask)}]
+
+    #### Add one timing or availability requirement at a time and recount the cohort.
     for column in ["quality_units_accepted", "aligned_glucose", "aligned_main_sleep", "sufficient_wearables"]:
         mask &= daily[column]
         rows.append({"stage": column, **availability_counts(daily, mask)})
+
     return pd.DataFrame(rows).assign(cutoff_hour=cutoff_hour)
 
 
 def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame, settings: dict) -> str:
+    #### Describe the preparation-time timing rules, data reduction and interpretation limits.
     lines = ["# Primary analysis: mcPHASES 2022", "",
              "Primary cutoff: 14:00. Use one day's inputs; no multi-day trends.",
              f"CGM: previous calendar day, >={settings['min_glucose_coverage']:.0%} coverage and no uncovered gap >{settings['max_glucose_gap_hours']:g} hours.",
@@ -701,8 +896,12 @@ def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame, set
              "## Cumulative data reduction", "",
              "| Requirement added | Participants | Days with phase information | Luteal days | Luteal starts |",
              "|---|---:|---:|---:|---:|"]
+
+    #### Add one report row for each cumulative exclusion stage.
     for row in attrition.itertuples():
         lines.append(f"| {row.stage} | {row.participants} | {row.labelled_days} | {row.luteal_days} | {row.exact_transitions} |")
+
+    #### Append preparation assumptions and limits after the data-reduction table.
     lines += ["", f"HRV intervals passing sleep matching and quality: {int(intervals['usable_in_main_sleep'].sum())}.",
               "", "## Interpretation", "",
               "This is exploratory analysis, not demonstrated real-time deployment. The thresholds are",
@@ -712,19 +911,25 @@ def temporal_protocol_text(attrition: pd.DataFrame, intervals: pd.DataFrame, set
               "Participant splits and onset-alert evaluation rules remain to be specified.",
               "The descriptive audit and same-day quality reports are diagnostics, not the primary cohort.",
               "Historical noon/three-day outputs are superseded and must not be mixed with this run."]
+
     return "\n".join(lines) + "\n"
 
 
 def save_temporal_review(tables: dict, daily: pd.DataFrame, args: argparse.Namespace) -> None:
+    #### Save sleep-aligned HRV, all prediction-day checks and the eligible daily cohort.
     settings = eligibility_settings(args)
     quality, sleep, temperature = build_quality_review(tables, daily, settings)
     intervals = align_hrv_to_sleep(tables["heart_rate_variability_details"], sleep, settings)
     intervals.to_csv(args.processed_dir / "hrv_sleep_alignment_2022.csv", index=False)
+
+    #### Align measurements to the fixed cutoff and save both all checks and eligible days.
     hour = PRIMARY_CUTOFF_HOUR
     aligned = aligned_prediction_days(quality, sleep, temperature, intervals, settings, hour)
     aligned.to_csv(args.processed_dir / f"prediction_alignment_{hour:02d}_2022.csv", index=False)
     aligned.loc[aligned["eligible_prediction"]].to_csv(
         args.processed_dir / f"eligible_observations_{hour:02d}_2022.csv", index=False)
+
+    #### Report cumulative exclusions using the same alignment rules as the saved cohort.
     attrition = temporal_attrition(aligned, hour)
     attrition.to_csv(args.report_dir / "temporal_attrition.csv", index=False)
     (args.report_dir / "temporal_protocol.md").write_text(
@@ -732,6 +937,8 @@ def save_temporal_review(tables: dict, daily: pd.DataFrame, args: argparse.Names
 
 
 def build_quality_review(tables: dict, daily: pd.DataFrame, settings: dict) -> tuple:
+    #### Combine individual signal-quality checks into a daily diagnostic table before temporal
+    #### alignment.
     sleep = review_sleep_sessions(tables["sleep"], settings)
     temperature = review_temperature_sessions(tables["computed_temperature"], sleep)
     scores = review_sleeping_heart_rate(tables["sleep_score"], sleep)
@@ -740,22 +947,32 @@ def build_quality_review(tables: dict, daily: pd.DataFrame, settings: dict) -> t
     result = join_daily(result, hrv_quality_counts(tables["heart_rate_variability_details"], settings))
     result = join_daily(result, selected_day_flag(sleep, "quality_main_sleep"))
     result = join_daily(result, selected_day_flag(temperature, "quality_temperature"))
+
+    #### Represent absent interval counts as zero before applying quality thresholds.
     for column in ["hrv_quality_windows", "hrv_bounded_quality_windows", "hrv_coverage_above_one_windows"]:
         result[column] = result[column].fillna(0).astype("int64")
+
     result[["quality_main_sleep", "quality_temperature"]] = result[["quality_main_sleep", "quality_temperature"]].fillna(False).astype(bool)
+
+    #### Apply the recorded unit mapping and nominal glucose-coverage requirements.
     result["quality_units_accepted"] = ~result["id"].isin(settings["unresolved_glucose_ids"])
     result["quality_glucose"] = result["glucose_unique_samples"].gt(0)
     result["quality_glucose"] &= result["glucose_nominal_coverage_fraction"].ge(settings["min_glucose_coverage"])
     result["quality_glucose"] &= result["glucose_longest_uncovered_seconds"].le(settings["max_glucose_gap_hours"] * 3600)
     result["quality_hrv"] = result["hrv_quality_windows"].ge(settings["min_hrv_windows"])
     result["quality_rhr"] = result["resting_heart_rate_available_records"].gt(0)
+
+    #### The same-day overlap is a diagnostic preview, not the temporally aligned model cohort.
     flags = ["quality_units_accepted", "quality_glucose", "quality_hrv", "quality_sleeping_hr",
              "quality_main_sleep", "quality_temperature"]
     result["same_day_quality_overlap"] = result[flags].all(axis=1) & result["phase"].notna()
+
     return result, sleep, temperature
 
 
 def availability_counts(daily: pd.DataFrame, mask: pd.Series) -> dict:
+    #### Count participants, labelled days and supplied-label starts within a selected set of
+    #### days.
     mask = mask.fillna(False).astype(bool)
     return {"participants": int(daily.loc[mask, "id"].nunique()), "days": int(mask.sum()),
             "labelled_days": int((mask & daily["phase"].notna()).sum()),
@@ -765,14 +982,24 @@ def availability_counts(daily: pd.DataFrame, mask: pd.Series) -> dict:
 
 
 def rule_effect(daily: pd.DataFrame, rule: str, before: pd.Series, after: pd.Series) -> dict:
+    #### Compare availability before and after one quality rule using clearly named output
+    #### columns.
     result = {"rule": rule}
+
+    #### Give the before and after counts separate prefixes for direct comparison.
     for prefix, mask in [("before", before), ("after", after)]:
         result.update({f"{prefix}_{key}": value for key, value in availability_counts(daily, mask).items()})
+
     return result
 
 
 def quality_rule_effects(daily: pd.DataFrame, settings: dict) -> pd.DataFrame:
+    #### Assess each existing quality rule separately; these diagnostic counts are not
+    #### cumulative.
     labelled = daily["phase"].notna()
+
+    #### Define each before-and-after comparison independently to avoid implying additive
+    #### exclusions.
     cases = [
         ("standardised_glucose_units_from_confirmed_mapping", labelled, labelled & daily["quality_units_accepted"]),
         ("sleeping_heart_rate_selected_main_sleep", daily["sleep_score_records"].gt(0), daily["quality_sleeping_hr"]),
@@ -782,59 +1009,89 @@ def quality_rule_effects(daily: pd.DataFrame, settings: dict) -> pd.DataFrame:
         ("one_valid_nonoverlapping_main_sleep", daily["sleep_available_records"].gt(0), daily["quality_main_sleep"]),
         ("skin_temperature_matches_selected_main_sleep", daily["computed_temperature_available_records"].gt(0), daily["quality_temperature"]),
     ]
+
     return pd.DataFrame(rule_effect(daily, name, before, after) for name, before, after in cases)
 
 
 def quality_attrition(daily: pd.DataFrame) -> pd.DataFrame:
+    #### Show cumulative exclusions for the same-day quality preview, before prediction-time
+    #### alignment.
     mask = daily["phase"].notna()
     rows = [{"stage": "recognised_labels", **availability_counts(daily, mask)}]
+
+    #### Apply the existing same-day quality checks in their recorded order.
     for column in ["quality_units_accepted", "quality_glucose", "quality_main_sleep", "quality_sleeping_hr", "quality_hrv",
                    "quality_temperature"]:
         mask &= daily[column]
         rows.append({"stage": column, **availability_counts(daily, mask)})
+
     return pd.DataFrame(rows)
 
 
 def quality_sensitivity(daily: pd.DataFrame, hrv: pd.DataFrame, settings: dict) -> pd.DataFrame:
+    #### Report the existing diagnostic coverage settings without fitting models or selecting
+    #### the final cohort.
     rows = []
+
+    #### Compare the existing glucose coverage fractions for descriptive review.
     for fraction in sorted({0.7, 0.8, 0.9, settings["min_glucose_coverage"]}):
+        #### Count days at each allowed maximum gap length.
         for gap_hours in sorted({2.0, 4.0, settings["max_glucose_gap_hours"]}):
             mask = daily["glucose_unique_samples"].gt(0) & daily["glucose_nominal_coverage_fraction"].ge(fraction)
             mask &= daily["glucose_longest_uncovered_seconds"].le(gap_hours * 3600)
             rows.append({"signal": "glucose", "minimum_coverage": fraction,
                          "maximum_gap_hours": gap_hours, **availability_counts(daily, mask)})
+
+    #### Recalculate HRV counts for each existing coverage threshold.
     for fraction in sorted({0.7, 0.8, 0.9, settings["min_hrv_coverage"]}):
         counts = hrv_quality_counts(hrv, settings | {"min_hrv_coverage": fraction})
         joined = join_daily(daily[KEY], counts)
+
+        #### Show both inclusion and exclusion of coverage values above one.
         for bounded in [False, True]:
+            #### Count days at each existing minimum number of usable intervals.
             for windows in sorted({3, 6, 12, settings["min_hrv_windows"]}):
                 column = "hrv_bounded_quality_windows" if bounded else "hrv_quality_windows"
                 mask = joined[column].fillna(0).ge(windows)
                 rows.append({"signal": "hrv", "minimum_coverage": fraction,
                              "upper_bound_one": bounded, "minimum_windows": windows,
                              **availability_counts(daily, mask)})
+
     return pd.DataFrame(rows)
 
 
 def session_end_sensitivity(daily: pd.DataFrame, sessions: dict) -> pd.DataFrame:
+    #### Count availability at the existing hypothetical sleep-end times for descriptive review.
     rows = []
+
+    #### Review the selected sessions for each sensor table.
     for name, data in sessions.items():
+        #### Count which participant-days have a selected session ending by each hypothetical
+        #### time.
         for hour in [6, 8, 10, 12]:
             selected = data["review_selected"] & (data["audit_end_seconds"] % 86400).le(hour * 3600)
             keys = pd.MultiIndex.from_frame(data.loc[selected, KEY])
             mask = pd.Series(pd.MultiIndex.from_frame(daily[KEY]).isin(keys), index=daily.index)
             rows.append({"table": name, "hypothetical_end_clock_hour": hour,
                          **availability_counts(daily, mask)})
+
     return pd.DataFrame(rows)
 
 
 def unit_evidence(data: pd.DataFrame) -> pd.DataFrame:
+    #### Summarise each participant's source and converted glucose distributions without
+    #### inferring units from size.
     rows = []
+
+    #### Describe source-scale and converted glucose values separately for each participant.
     for key, group in data.groupby(PARTICIPANT_KEY):
         values = pd.to_numeric(group["glucose_value"], errors="coerce")
         values = values.loc[values.notna() & np.isfinite(values) & values.gt(0)]
         source = pd.to_numeric(group["glucose_source_value"], errors="coerce")
         source = source.loc[source.notna() & np.isfinite(source) & source.gt(0)]
+
+        #### Describe converted glucose alongside the preserved source distribution and
+        #### conversion flags.
         stats = {"minimum": values.min(), "q25": values.quantile(0.25),
                  "median": values.median() if len(values) else np.nan,
                  "q75": values.quantile(0.75), "maximum": values.max()}
@@ -849,12 +1106,15 @@ def unit_evidence(data: pd.DataFrame) -> pd.DataFrame:
             "units_unconfirmed": key[0] in UNRESOLVED_GLUCOSE_IDS,
             "primary_participant_exclusion": key[0] in UNRESOLVED_GLUCOSE_IDS,
         })
+
     return pd.DataFrame(rows)
 
 
 def decision_log_text(effects: pd.DataFrame, attrition: pd.DataFrame,
                       sessions: pd.DataFrame, transitions: pd.DataFrame, settings: dict,
                       evidence: dict) -> str:
+    #### Explain the preparation decisions and their diagnostic counts in a readable Markdown
+    #### report.
     lines = ["# Eligibility decision log: mcPHASES 2022", "",
              "Effects below use each signal's exported calendar day. They do not apply a prediction cutoff,",
              "prior-day CGM lag, or trailing histories. They must not be used as the final modelling cohort.",
@@ -896,37 +1156,53 @@ def decision_log_text(effects: pd.DataFrame, attrition: pd.DataFrame,
              "## Rule effects (independent comparisons)", "",
              "| Rule | Participants before → after | Labelled days before → after | Exact transitions before → after |",
              "|---|---:|---:|---:|"]
+
+    #### List independent before-and-after counts for each quality rule.
     for row in effects.itertuples():
         lines.append(f"| {row.rule} | {row.before_participants} → {row.after_participants} | "
                      f"{row.before_labelled_days} → {row.after_labelled_days} | {row.before_exact_transitions} → {row.after_exact_transitions} |")
+
     lines += ["", "## Cumulative same-day overlap preview", "",
               "| Stage | Participants | Labelled days | Exact transitions |", "|---|---:|---:|---:|"]
+
+    #### Show the separate cumulative same-day exclusion counts.
     for row in attrition.itertuples():
         lines.append(f"| {row.stage} | {row.participants} | {row.labelled_days} | {row.exact_transitions} |")
+
     lines += ["", "Transition categories: " + ", ".join(f"{key}={value}" for key, value in transitions["transition_status"].value_counts().items()) + ".",
               "Session counts (cross-midnight / days with multiple sessions):"]
+
+    #### Summarise cross-midnight and multiple-session records for each table.
     for name, group in sessions.groupby("table"):
         multiple = group.loc[group["sessions_on_end_day"].gt(1), KEY].drop_duplicates()
         lines.append(f"- {name}: {int(group['cross_midnight'].sum())} / {len(multiple)}.")
+
     lines += ["", "Sources reviewed " + SOURCE_REVIEW_DATE + ": raw/README.txt and"]
     lines += [f"- [{name}]({source['url']})" for name, source in EVIDENCE_SOURCES.items()]
     lines += ["", "For the active prediction cutoff and shared data requirements, see temporal_protocol.md when generated.",
               "Remaining audit uncertainties: cause of HRV overshoot,",
               "clock/sync availability assumptions, trailing-history rules, and the final common cohort."]
+
     return "\n".join(lines) + "\n"
 
 
 def save_eligibility_review(tables: dict, daily: pd.DataFrame, args: argparse.Namespace) -> None:
+    #### Save quality checks, existing diagnostic comparisons and the evidence behind
+    #### preparation choices.
     settings = eligibility_settings(args)
     quality, sleep, temperature = build_quality_review(tables, daily, settings)
     scores = review_sleeping_heart_rate(tables["sleep_score"], sleep)
     scores.to_csv(args.processed_dir / "sleeping_hr_session_review_2022.csv", index=False)
     scores.loc[~scores["review_selected"]].to_csv(args.report_dir / "sleeping_hr_excluded_scores.csv", index=False)
+
+    #### Review reference-start uncertainty separately from sensor session quality.
     transitions = phase_transition_review(daily)
     sessions = pd.concat([session_diagnostics(sleep, "sleep"),
                           session_diagnostics(temperature, "computed_temperature")], ignore_index=True)
     effects = quality_rule_effects(quality, settings)
     attrition = quality_attrition(quality)
+
+    #### Save the diagnostic tables before writing the explanation of preparation choices.
     quality.to_csv(args.processed_dir / "quality_review_daily_2022.csv", index=False)
     sessions.to_csv(args.processed_dir / "session_review_2022.csv", index=False)
     transitions.to_csv(args.processed_dir / "phase_transition_review_2022.csv", index=False)
@@ -937,6 +1213,8 @@ def save_eligibility_review(tables: dict, daily: pd.DataFrame, args: argparse.Na
         args.report_dir / "coverage_sensitivity.csv", index=False)
     session_end_sensitivity(quality, {"sleep": sleep, "computed_temperature": temperature}).to_csv(
         args.report_dir / "session_end_time_sensitivity.csv", index=False)
+
+    #### Record settings, reviewed sources and the local source-document checksum.
     provenance = {"reviewed_on": SOURCE_REVIEW_DATE, "sources": EVIDENCE_SOURCES,
                   "local_readme_sha256": file_sha256(args.raw_dir / "README.txt") if (args.raw_dir / "README.txt").exists() else None,
                   "settings": settings, "glucose_unit_policy": glucose_unit_policy(), "model_ready": False}
@@ -951,8 +1229,12 @@ def save_eligibility_review(tables: dict, daily: pd.DataFrame, args: argparse.Na
 
 
 def describe_values(data: pd.DataFrame, name: str, spec: dict) -> list[dict]:
+    #### Describe the finite numeric measurements for each participant and signal.
     records = []
+
+    #### Keep descriptive distributions separate for each participant and collection interval.
     for key, group in data.groupby(PARTICIPANT_KEY):
+        #### Calculate the same descriptive measures for each exported signal.
         for column in spec["values"]:
             values = pd.to_numeric(group[column], errors="coerce")
             values = values.loc[np.isfinite(values)]
@@ -962,15 +1244,21 @@ def describe_values(data: pd.DataFrame, name: str, spec: dict) -> list[dict]:
                 "median": values.median() if len(values) else np.nan,
                 "q75": values.quantile(0.75), "maximum": values.max(),
             })
+
     return records
 
 
 def participant_coverage(daily: pd.DataFrame) -> pd.DataFrame:
+    #### Summarise recording spans, known labels and sensor availability for each participant.
     grouped = daily.groupby(PARTICIPANT_KEY)
     result = grouped["day_in_study"].agg(first_day="min", last_day="max", calendar_days="size")
+
+    #### Count known labels and reference starts alongside each participant's recording span.
     result["labelled_days"] = grouped["phase"].count()
     result["exact_luteal_onsets"] = grouped["exact_luteal_onset"].sum()
     result["uncertain_luteal_entries"] = grouped["uncertain_luteal_entry"].sum()
+
+    #### Count observed and structurally usable days for each sensor table.
     for name in TABLE_SPECS:
         if name == "hormones_and_selfreport":
             continue
@@ -978,43 +1266,62 @@ def participant_coverage(daily: pd.DataFrame) -> pd.DataFrame:
             [daily[column] for column in PARTICIPANT_KEY]).sum()
         result[f"{name}_available_days"] = daily[f"{name}_available_records"].gt(0).groupby(
             [daily[column] for column in PARTICIPANT_KEY]).sum()
+
     return result.reset_index()
 
 
 def file_sha256(path: Path) -> str:
+    #### Calculate a file checksum so changes to source files can be detected.
     digest = hashlib.sha256()
     with path.open("rb") as stream:
+        #### Read manageable chunks so large exports do not need to fit in memory.
         for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
+
     return digest.hexdigest()
 
 
 def inventory_files(raw_dir: Path) -> pd.DataFrame:
+    #### Record CSV headers and sizes, and checksum the seven fully audited exports.
     records = []
+
+    #### Inspect every CSV header, but fully checksum only the audited exports.
     for path in sorted(raw_dir.glob("*.csv")):
         audited = path.stem in TABLE_SPECS
         records.append({"file": path.name, "bytes": path.stat().st_size,
                         "columns": ",".join(pd.read_csv(path, nrows=0).columns),
                         "fully_audited_2022": audited,
                         "sha256": file_sha256(path) if audited else ""})
+
     return pd.DataFrame(records)
 
 
 def build_daily_audit(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    #### Combine the complete calendar grid, supplied labels and daily measurement diagnostics.
     daily = add_labels(create_daily_grid(tables), tables["hormones_and_selfreport"])
+
+    #### Join each table's record counts onto the same complete daily grid.
     for name, data in tables.items():
         daily = join_daily(daily, daily_record_counts(data, name))
+
+    #### Represent days with no sensor records as zero counts, without filling measured values.
     count_columns = [column for column in daily if column.endswith(("_records", "_rows"))]
     daily[count_columns] = daily[count_columns].fillna(0).astype("int64")
     daily = join_daily(daily, glucose_coverage(tables["glucose"]))
     defaults = glucose_day_diagnostics(np.array([]))
     daily[list(defaults)] = daily[list(defaults)].fillna(defaults)
+
     return daily.sort_values(KEY).reset_index(drop=True)
 
 
 def write_report(report_dir: Path, daily: pd.DataFrame) -> None:
+    #### Write a descriptive audit overview, including data-quality rules and interpretation
+    #### limits.
     exact = int(daily["exact_luteal_onset"].sum())
     uncertain = int(daily["uncertain_luteal_entry"].sum())
+
+    #### Generate report text from the current cohort counts; this string is written as
+    #### Markdown.
     text = f"""# mcPHASES 2022 descriptive audit
 
 Participants: {daily['id'].nunique()}
@@ -1095,20 +1402,28 @@ directory; use new --processed-dir and --report-dir paths for another run.
 def save_outputs(tables: dict, daily: pd.DataFrame, summaries: list,
                  checks: list, distributions: list, inventory: pd.DataFrame,
                  args: argparse.Namespace) -> None:
+    #### Save audited tables and reports in the verified output directories, preserving raw
+    #### files.
     args.processed_dir.mkdir(parents=True, exist_ok=True)
     args.report_dir.mkdir(parents=True, exist_ok=True)
+
+    #### Save each audited export with separate flagged-row and missing-value reports.
     for name, data in tables.items():
         data.to_csv(args.processed_dir / f"{name}_2022_audited.csv", index=False)
         flags = data["audit_conflicting_key"] | data["audit_invalid_time"] | data["audit_invalid_value"]
         data.loc[flags].to_csv(args.report_dir / f"{name}_flagged_rows.csv", index=False)
         data.drop(columns=[column for column in data if column.startswith("audit_")]).isna().sum().rename(
             "missing_rows").rename_axis("column").to_csv(args.report_dir / f"{name}_missingness.csv")
+
+    #### Save shared daily diagnostics and summary tables after the signal-specific exports.
     daily.to_csv(args.processed_dir / "daily_audit_2022.csv", index=False)
     pd.DataFrame(summaries).to_csv(args.report_dir / "table_audit.csv", index=False)
     pd.DataFrame(checks).to_csv(args.report_dir / "numeric_missingness.csv", index=False)
     pd.DataFrame(distributions).to_csv(args.report_dir / "value_distributions.csv", index=False)
     participant_coverage(daily).to_csv(args.report_dir / "participant_coverage.csv", index=False)
     inventory.to_csv(args.report_dir / "file_inventory.csv", index=False)
+
+    #### Report unknown phase labels separately without reassigning them to a known phase.
     labels = tables["hormones_and_selfreport"]["phase"].astype("string").str.strip().str.lower()
     labels.value_counts(dropna=False).rename_axis("phase").rename("rows").to_csv(args.report_dir / "phase_counts.csv")
     unknown = labels.notna() & ~labels.isin(PHASES) & labels.ne("")
@@ -1117,14 +1432,23 @@ def save_outputs(tables: dict, daily: pd.DataFrame, summaries: list,
 
 
 def run_audit(args: argparse.Namespace) -> pd.DataFrame:
+    #### Run preparation from path checks through saved outputs and reproducibility information.
     settings = eligibility_settings(args)
     if getattr(args, "temporal_review", False):
         args.eligibility_review = True
+
+    #### Resolve input and output paths before checking that they are safe and separate.
     for attribute in ["raw_dir", "processed_dir", "report_dir"]:
         setattr(args, attribute, getattr(args, attribute).resolve())
+
     validate_output_paths(args.raw_dir, [args.processed_dir, args.report_dir])
+
+    #### Record input files before reading the tables so later checksum checks can detect
+    #### changes.
     inventory = inventory_files(args.raw_dir)
     tables, summaries, checks, distributions = {}, [], [], []
+
+    #### Audit each specified export and collect its diagnostic summaries.
     for name, spec in TABLE_SPECS.items():
         print(f"Auditing {name}: 2022 only", flush=True)
         data, summary, numeric_checks = audit_table(args.raw_dir, name, spec)
@@ -1132,16 +1456,25 @@ def run_audit(args: argparse.Namespace) -> pd.DataFrame:
         summaries.append(summary)
         checks.extend({"table": name, **check} for check in numeric_checks)
         distributions.extend(describe_values(data, name, spec))
+
+    #### Combine measurements on a complete calendar grid before saving any results.
     daily = build_daily_audit(tables)
     hashes = dict(inventory.loc[inventory["fully_audited_2022"], ["file", "sha256"]].itertuples(index=False, name=None))
+
+    #### Recheck input checksums before writing outputs to detect changes during the audit.
     for filename, expected in hashes.items():
         if file_sha256(args.raw_dir / filename) != expected:
             raise RuntimeError(f"Source changed during audit: {filename}")
+
+    #### Write basic outputs first, followed by any requested quality and temporal reviews.
     save_outputs(tables, daily, summaries, checks, distributions, inventory, args)
     if getattr(args, "eligibility_review", False):
         save_eligibility_review(tables, daily, args)
     if getattr(args, "temporal_review", False):
         save_temporal_review(tables, daily, args)
+
+    #### Record settings, package versions and checksums needed to reproduce this preparation
+    #### run.
     config = {"study_interval": STUDY_INTERVAL, "raw_dir": str(args.raw_dir),
               "processed_dir": str(args.processed_dir), "report_dir": str(args.report_dir),
               "python_version": platform.python_version(), "pandas_version": pd.__version__,
@@ -1158,6 +1491,7 @@ def run_audit(args: argparse.Namespace) -> pd.DataFrame:
     (args.report_dir / "run_config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     print(f"Audit complete: {daily['id'].nunique()} participants; {len(daily)} calendar participant-days.")
     print(f"Report: {args.report_dir / 'audit_report.md'}")
+
     return daily
 
 

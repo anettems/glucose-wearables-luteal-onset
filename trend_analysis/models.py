@@ -1,4 +1,4 @@
-"""Logistic regression with training-only replacement of raw and derived predictors."""
+#### Logistic regression with training-only replacement of raw and derived predictors.
 
 import numpy as np
 import pandas as pd

@@ -1,10 +1,9 @@
-"""Audit of the mcPHASES 2022 exports.
-
-Run from the thesis workspace: python code/preprocessing.py
-Requires pandas and NumPy. Confirmed glucose units are standardised to mmol/L;
-no model features or imputation are produced. Supplied phase labels are not
-independently validated outcomes.
-"""
+#### Audit of the mcPHASES 2022 exports.
+####
+#### Run from the thesis workspace: python code/preprocessing.py
+#### Requires pandas and NumPy. Confirmed glucose units are standardised to mmol/L;
+#### no model features or imputation are produced. Supplied phase labels are not
+#### independently validated outcomes.
 
 from __future__ import annotations
 
@@ -57,7 +56,7 @@ EVIDENCE_SOURCES = {
                    "sessions. Original session timing and this flag are retained for review.",
     },
 }
-# These checks identify structural problems, not final physiological cutoffs.
+#### These checks identify structural problems, not final physiological cutoffs.
 TABLE_SPECS = {
     "hormones_and_selfreport": {
         "values": ["lh", "estrogen", "pdg"], "positive": [],
@@ -89,9 +88,18 @@ TABLE_SPECS = {
 
 
 def create_argument_parser(*, prepare=False) -> argparse.ArgumentParser:
-    """Share input options with the primary analysis entry point."""
+    #### Share input options with the primary analysis entry point.
     workspace = Path(__file__).resolve().parents[1]
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Audit of the mcPHASES 2022 exports.\n"
+            "\n"
+            "Run from the thesis workspace: python code/preprocessing.py\n"
+            "Requires pandas and NumPy. Confirmed glucose units are standardised to mmol/L;\n"
+            "no model features or imputation are produced. Supplied phase labels are not\n"
+            "independently validated outcomes.\n"
+        )
+    )
     parser.add_argument("--raw-dir", type=Path, default=workspace / "code/data/raw")
     parser.add_argument(
         "--processed-dir", type=Path,
@@ -117,7 +125,7 @@ def parse_arguments(argv=None, *, prepare=False) -> argparse.Namespace:
 
 
 def validate_output_paths(raw_dir: Path, destinations: list[Path]) -> None:
-    """Refuse raw-data writes, overlapping destinations and existing outputs."""
+    #### Refuse raw-data writes, overlapping destinations and existing outputs.
     for destination in destinations:
         if destination == raw_dir or raw_dir in destination.parents:
             raise ValueError("Output directories must be outside the raw-data directory")
@@ -177,7 +185,7 @@ def load_2022(path: Path, spec: dict) -> tuple[pd.DataFrame, int]:
 
 
 def clock_seconds(values: pd.Series) -> pd.Series:
-    # Reject dates, durations and timezone strings: the exports contain clocks.
+    #### Reject dates, durations and timezone strings: the exports contain clocks.
     pattern = r"\d{2}:\d{2}:\d{2}(?:\.\d+)?"
     text = values.astype("string")
     valid_format = text.str.fullmatch(pattern, na=False)
@@ -230,7 +238,7 @@ def add_numeric_checks(data: pd.DataFrame, spec: dict) -> tuple[pd.DataFrame, li
             invalid |= values.le(0)
         else:
             invalid |= values.lt(0)
-        # Temperature is a descriptive field; no clinical limits are imposed.
+        #### Temperature is a descriptive field; no clinical limits are imposed.
         if column == "nightly_temperature":
             invalid = data[column].notna() & (values.isna() | ~np.isfinite(values))
         data["audit_invalid_value"] |= invalid
@@ -278,7 +286,7 @@ def glucose_unit_policy() -> dict:
 
 
 def standardise_glucose_units(data: pd.DataFrame) -> pd.DataFrame:
-    """Apply the confirmed participant mapping once, after checking source values."""
+    #### Apply the confirmed participant mapping once, after checking source values.
     if "glucose_source_value" in data:
         raise ValueError("Glucose units have already been standardised; read the raw export")
     result = data.copy()
@@ -315,7 +323,7 @@ def add_labels(grid: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
     labels = labels.copy()
     labels["phase"] = labels["phase"].astype("string").str.strip().str.lower().replace("", pd.NA)
     labels["audit_unknown_phase"] = labels["phase"].notna() & ~labels["phase"].isin(PHASES)
-    # Conflicting daily records remain in the audited source, never resolved by averaging.
+    #### Conflicting daily records remain in the audited source, never resolved by averaging.
     reliable = labels.loc[~labels["audit_conflicting_key"] & ~labels["audit_unknown_phase"]]
     daily = join_daily(grid, reliable[KEY + ["phase"]]).sort_values(KEY).reset_index(drop=True)
     daily["label_record_present"] = pd.MultiIndex.from_frame(daily[KEY]).isin(
@@ -341,7 +349,7 @@ def daily_record_counts(data: pd.DataFrame, name: str) -> pd.DataFrame:
 
 
 def glucose_day_coverage(seconds: np.ndarray) -> dict:
-    """Describe coverage using nominal forward five-minute intervals, clipped at midnight."""
+    #### Describe coverage using nominal forward five-minute intervals, clipped at midnight.
     seconds = np.sort(np.unique(seconds))
     if not len(seconds):
         return {"glucose_nominal_observed_seconds": 0.0,
@@ -422,7 +430,7 @@ def hrv_quality_counts(data: pd.DataFrame, settings: dict) -> pd.DataFrame:
 
 
 def overlapping_session_flags(data: pd.DataFrame, candidates: pd.Series) -> pd.Series:
-    """Flag both members of overlapping main sessions, including across end days."""
+    #### Flag both members of overlapping main sessions, including across end days.
     flags = pd.Series(False, index=data.index)
     for _, group in data.loc[candidates].groupby(PARTICIPANT_KEY):
         active = {}
@@ -452,7 +460,7 @@ def review_sleep_sessions(data: pd.DataFrame, settings: dict) -> pd.DataFrame:
 
 
 def review_sleeping_heart_rate(data: pd.DataFrame, sleep: pd.DataFrame) -> pd.DataFrame:
-    """Use exact session ends; naps, ambiguous ends and unmatched scores are excluded."""
+    #### Use exact session ends; naps, ambiguous ends and unmatched scores are excluded.
     keys = KEY + ["audit_end_seconds"]
     ends = sleep.groupby(keys).agg(
         matched_sleep_sessions=("id", "size"),
@@ -480,7 +488,7 @@ def review_sleeping_heart_rate(data: pd.DataFrame, sleep: pd.DataFrame) -> pd.Da
 
 
 def join_daily_scores_to_main(scores: pd.DataFrame, main: pd.DataFrame) -> pd.DataFrame:
-    """Retain end-time discrepancies as diagnostics, never as matching tolerances."""
+    #### Retain end-time discrepancies as diagnostics, never as matching tolerances.
     result = scores.merge(main, on=KEY, how="left", validate="many_to_one")
     result["score_minus_main_end_seconds"] = (
         result["audit_end_seconds"] - result["selected_main_sleep_end_seconds"])
@@ -565,7 +573,7 @@ def temporal_settings() -> dict:
 
 def align_hrv_to_sleep(data: pd.DataFrame, sleep: pd.DataFrame,
                        settings: dict) -> pd.DataFrame:
-    """Match whole five-minute intervals to selected, non-overlapping main sleep."""
+    #### Match whole five-minute intervals to selected, non-overlapping main sleep.
     columns = KEY + ["timestamp", "rmssd", "coverage", "audit_end_seconds",
                      "audit_structurally_usable"]
     result = data[columns].copy().reset_index(drop=True)
@@ -600,14 +608,14 @@ def sleep_hrv_counts(intervals: pd.DataFrame) -> pd.DataFrame:
 
 
 def lag_daily_columns(daily: pd.DataFrame, columns: dict) -> pd.DataFrame:
-    """Join by the preceding calendar day, never by the preceding available row."""
+    #### Join by the preceding calendar day, never by the preceding available row.
     result = daily[KEY + list(columns)].rename(columns=columns).copy()
     result["day_in_study"] += 1
     return result
 
 
 def add_calendar_history(daily: pd.DataFrame) -> pd.DataFrame:
-    """Legacy three-day extension helper; not used by the primary protocol."""
+    #### Legacy three-day extension helper; not used by the primary protocol.
     result = daily.copy()
     result["history_usable_days"] = 0
     for lag in range(3):
@@ -616,7 +624,7 @@ def add_calendar_history(daily: pd.DataFrame) -> pd.DataFrame:
         previous = previous.rename(columns={"aligned_inputs_available": "_history_usable"})
         result = join_daily(result, previous)
         result["history_usable_days"] += result.pop("_history_usable").fillna(False).astype(int)
-    # Historical phase labels are not predictors and need not be present.
+    #### Historical phase labels are not predictors and need not be present.
     result["eligible_prediction"] = result["history_usable_days"].eq(3) & result["phase"].notna()
     result["history_first_aligned_day"] = result["day_in_study"] - 2
     result["history_first_glucose_day"] = result["day_in_study"] - 3
@@ -657,7 +665,7 @@ def aligned_prediction_days(quality: pd.DataFrame, sleep: pd.DataFrame,
 
 
 def apply_prediction_requirements(daily: pd.DataFrame) -> pd.DataFrame:
-    """Keep one-day inputs; a missing wearable does not invalidate the other two."""
+    #### Keep one-day inputs; a missing wearable does not invalidate the other two.
     result = daily.copy()
     wearables = ["aligned_sleeping_hr", "aligned_hrv", "aligned_temperature"]
     result["valid_wearable_count"] = result[wearables].sum(axis=1)

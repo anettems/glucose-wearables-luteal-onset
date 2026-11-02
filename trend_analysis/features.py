@@ -1,4 +1,4 @@
-"""Quality-approved history, strict calendar windows and shared cohort audit."""
+#### Quality-approved history, strict calendar windows and shared cohort audit.
 
 import numpy as np
 import pandas as pd
@@ -14,7 +14,7 @@ FEATURES = FEATURE_SETS["combined"]
 
 
 def load_quality_history(processed, configuration):
-    """Keep valid individual signals even when another modality or the label is absent."""
+    #### Keep valid individual signals even when another modality or the label is absent.
     alignment = pd.read_csv(processed / "prediction_alignment_14_2022.csv")
     validate_event_keys(alignment)
     history = alignment[prep.KEY + ["sleeping_hr_bpm"]].copy()
@@ -57,7 +57,7 @@ def window_statistics(days, values, day):
 
 
 def add_personal_features(history):
-    """Exclude the current aligned value and every future day from both history windows."""
+    #### Exclude the current aligned value and every future day from both history windows.
     validate_history(history)
     parts = []
     for _, group in history.sort_values(prep.KEY).groupby(prep.PARTICIPANT_KEY, sort=True):
@@ -74,7 +74,7 @@ def add_personal_features(history):
 
 
 def select_history_cohort(observations, enriched):
-    """Use one cohort for all input sets and all three feature representations."""
+    #### Use one cohort for all input sets and all three feature representations.
     for feature in FEATURES:
         actual = enriched[prep.KEY + [feature]]
         joined = observations[prep.KEY + [feature]].merge(actual, on=prep.KEY, how="left", validate="one_to_one",

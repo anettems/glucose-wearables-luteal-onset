@@ -1,4 +1,4 @@
-"""One-day features and training-only wearable replacement for the 14:00 protocol."""
+#### One-day features and training-only wearable replacement for the 14:00 protocol.
 
 import json
 from pathlib import Path
@@ -21,9 +21,9 @@ def glucose_features(glucose):
     usable = glucose.loc[prep.primary_records(glucose, "glucose_value")]
     result = usable.groupby(prep.KEY).glucose_value.agg(
         glucose_median_mmol_l="median", mean="mean", sd="std").reset_index()
-    # pandas std uses the sample standard deviation (ddof=1).
+    #### pandas std uses the sample standard deviation (ddof=1).
     result["glucose_cv_percent"] = 100 * result.pop("sd") / result.pop("mean")
-    result["day_in_study"] += 1  # Calendar lag, never the preceding available row.
+    result["day_in_study"] += 1  #### Calendar lag, never the preceding available row.
     return result
 
 
@@ -35,7 +35,7 @@ def hrv_features(intervals):
 
 
 def construct_features(eligible, glucose, intervals, temperature):
-    """Keep invalid/unavailable summaries blank even when a source value exists."""
+    #### Keep invalid/unavailable summaries blank even when a source value exists.
     metadata = prep.KEY + OUTCOMES + ["prior_day_source_day", "sleeping_hr_source_day",
         "prediction_cutoff_seconds", "main_sleep_start_seconds", "main_sleep_end_seconds",
         "valid_wearable_count"] + WEARABLE_FLAGS
@@ -82,12 +82,11 @@ def validate_features(data):
 
 
 def replace_missing_wearables(training, evaluation):
-    """Fit on training participants; return two filled copies and the fitted medians.
-
-    Call separately for every validation split, then refit on development
-    participants before final testing. Select FEATURE_SETS columns for models.
-    No scaling, labels, IDs or missingness flags are added to the predictors.
-    """
+    #### Fit on training participants; return two filled copies and the fitted medians.
+    ####
+    #### Call separately for every validation split, then refit on development
+    #### participants before final testing. Select FEATURE_SETS columns for models.
+    #### No scaling, labels, IDs or missingness flags are added to the predictors.
     if training.empty or evaluation.empty:
         raise ValueError("Training and evaluation data must both be non-empty")
     if set(training.id) & set(evaluation.id):
@@ -106,7 +105,7 @@ def replace_missing_wearables(training, evaluation):
 
 
 def prepare_datasets(processed_dir, report_dir):
-    """Build shared, unimputed features from the reproducible audit outputs."""
+    #### Build shared, unimputed features from the reproducible audit outputs.
     processed_dir, report_dir = Path(processed_dir), Path(report_dir)
     config_path = report_dir / "run_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))

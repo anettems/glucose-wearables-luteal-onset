@@ -1,4 +1,4 @@
-"""Calendar-based alerts with one shared event-matching implementation."""
+#### Calendar-based alerts with one shared event-matching implementation.
 
 import numpy as np
 import pandas as pd
@@ -25,7 +25,7 @@ def validate_event_keys(data):
 
 
 def alert_days(days, probabilities, threshold, consecutive_days):
-    """An absent day breaks pending confirmation; only a low score resets an episode."""
+    #### An absent day breaks pending confirmation; only a low score resets an episode.
     days = np.asarray(days, dtype=float)
     probabilities = np.asarray(probabilities, dtype=float)
     if days.shape != probabilities.shape or days.ndim != 1:
@@ -67,7 +67,7 @@ def generate_alerts(predictions, threshold, consecutive_days):
 
 
 def reference_evaluability(predictions, references):
-    """Assess windows using calendar distance to at least one eligible prediction day."""
+    #### Assess windows using calendar distance to at least one eligible prediction day.
     days = {key: group.day_in_study.to_numpy(dtype=int) for key, group in
             predictions.groupby(["id", "study_interval"], sort=False)}
     flags = [np.any(np.abs(days.get((row.id, row.study_interval), np.array([])) - row.day_in_study)
@@ -76,7 +76,7 @@ def reference_evaluability(predictions, references):
 
 
 def match_events(days, alert_values, reference_values):
-    """Greedily choose the closest pair, then earlier alert; each event is used once."""
+    #### Greedily choose the closest pair, then earlier alert; each event is used once.
     evaluable = np.array([np.any(np.abs(days - day) <= protocol.ALERT_MATCH_WINDOW_DAYS)
                           for day in reference_values], dtype=bool)
     candidates = []
@@ -96,7 +96,7 @@ def match_events(days, alert_values, reference_values):
 
 
 def iter_event_matches(predictions, references, threshold, consecutive_days):
-    """Share alert generation and matching between validation counts and detailed tables."""
+    #### Share alert generation and matching between validation counts and detailed tables.
     validate_event_keys(predictions)
     validate_event_keys(references)
     reference_groups = {key: group.day_in_study.to_numpy(dtype=int) for key, group in
@@ -135,7 +135,7 @@ def alert_metrics(predictions, references, threshold, consecutive_days):
 
 
 def evaluate_alerts(predictions, references, threshold, consecutive_days):
-    """Return auditable alert and reference tables using the same matching as tuning."""
+    #### Return auditable alert and reference tables using the same matching as tuning.
     alerts, reference_rows, alert_rows, errors = [], [], [], []
     for key, alert_values, probabilities, reference_values, evaluable, matches in iter_event_matches(
         predictions, references, threshold, consecutive_days,
@@ -165,7 +165,7 @@ def evaluate_alerts(predictions, references, threshold, consecutive_days):
 
 
 def select_alert_rule(validation_predictions, references):
-    """Choose the fixed-grid alert rule using mean validation event F1."""
+    #### Choose the fixed-grid alert rule using mean validation event F1.
     rows = []
     for threshold in protocol.ALERT_THRESHOLDS:
         for consecutive_days in protocol.ALERT_CONSECUTIVE_DAYS:
@@ -207,7 +207,7 @@ def select_alert_rule(validation_predictions, references):
 
 
 def evaluate_test_alerts(predictions, references, settings):
-    """Evaluate selected alert rules separately within their outer test folds."""
+    #### Evaluate selected alert rules separately within their outer test folds.
     alerts, reference_results, alert_results, metric_rows = [], [], [], []
     for setting in settings.itertuples(index=False):
         test_predictions = predictions.loc[

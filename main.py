@@ -1,3 +1,11 @@
+#### Run one of three stages of the primary 2022 analysis from the command line.
+#### Preparation reads source exports, checks measurement quality and the 14:00 cutoff,
+#### and saves audited data, paired feature tables and preparation reports.
+#### Freezing reads the prepared inputs and saves the protocol, feasible participant folds,
+#### software versions and source/input hashes without fitting a model.
+#### Evaluation checks the freeze, selects settings using validation participants, then
+#### saves held-out test probabilities, fitted settings, daily metrics and onset results.
+#### The text below also supplies the command-line help description and is kept as a string.
 """Prepare the 2022 inputs or run the locked primary model evaluation.
 
 The default command rebuilds the one-day 14:00 analysis inputs. Use
@@ -13,14 +21,18 @@ from primary_evaluation import freeze_primary_protocol, run_primary_evaluation
 
 
 def parse_main_arguments(argv=None):
-    """Expose preparation and evaluation options together, including in help."""
+    #### Read the requested stage and paths, including the existing preparation options.
     parser = preprocessing.create_argument_parser(prepare=True)
     parser.description = __doc__
+
+    #### Preparation is the default; freezing and evaluation cannot be requested together.
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--freeze-primary", action="store_true",
                        help="Save the final protocol, software versions and feasible folds without fitting")
     modes.add_argument("--evaluate-primary", action="store_true",
                        help="Evaluate the fixed models using the verified frozen protocol")
+
+    #### Set result paths relative to the workspace, independent of the working directory.
     workspace = Path(__file__).resolve().parents[1]
     parser.add_argument("--evaluation-dir", type=Path,
                         default=workspace / "results/primary_evaluation_2022_v4",
@@ -32,13 +44,18 @@ def parse_main_arguments(argv=None):
 
 
 def main(argv=None):
+    #### Run preparation, protocol freezing or evaluation and report the output location.
     args = parse_main_arguments(argv)
+
+    #### Save the protocol and participant assignments before any held-out predictions.
     if args.freeze_primary:
         result = freeze_primary_protocol(args.processed_dir, args.report_dir, args.frozen_protocol_dir,
                                          raw_dir=args.raw_dir)
         print(f"Protocol frozen: {result['participants']} participants, {result['days']} eligible days.")
         print(f"Frozen protocol: {result['output_dir']}")
         return result
+
+    #### Verify the saved freeze, then evaluate models on separate test participants.
     if args.evaluate_primary:
         result = run_primary_evaluation(
             args.processed_dir, args.report_dir, args.evaluation_dir,
@@ -49,6 +66,8 @@ def main(argv=None):
         print(f"Results: {args.evaluation_dir.resolve()}")
         return result
 
+    #### Audit source measurements with the timing checks, then build paired feature tables.
+    #### Missing wearable values remain unfilled until the training participants are known.
     args.temporal_review = True
     preprocessing.run_audit(args)
     data = prepare_datasets(args.processed_dir, args.report_dir)

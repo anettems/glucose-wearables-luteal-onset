@@ -143,3 +143,24 @@ Files: `protocol.py` records settings; `outcomes.py` constructs labels;
 uncertainty; `freezing.py` protects the saved design and inputs; `evaluation.py`
 runs either model comparison; `forest_freezing.py` saves/verifies the forest freeze;
 `report.py` writes the generated model report.
+
+## Additional daily accuracy assessment
+
+Run `code/.venv/Scripts/python.exe code/onset_prediction/classification.py` from
+the thesis workspace to assess the existing probabilities as daily yes/no predictions.
+This additional assessment was requested after the probability analysis. Its
+versioned rules and input/source hashes are saved before threshold selection.
+For each model family, input set and test fold, retain the model setting already
+selected by validation average precision. Select a threshold from 0.00 to 1.00
+in steps of 0.01 by highest mean balanced accuracy across the three validation
+folds; exact ties favour the higher threshold. Equality counts as positive.
+Apply that threshold to the corresponding test participants only.
+
+New results go to `results/onset_classification_2022_v1`; use `--output-dir` for
+a fresh destination. Historical probability outputs remain unchanged. Saved
+files include selected thresholds, candidate validation scores, held-out daily
+classifications, confusion counts, pooled/fold metrics and 95% intervals from
+the original 2,000 paired participant draws. Intervals are conditional on the
+fitted models and selected thresholds. Undefined precision (no positive
+predictions) remains missing. Sensitivity counts positive days, not distinct
+onset events. No models are refitted and no alert rules are introduced.

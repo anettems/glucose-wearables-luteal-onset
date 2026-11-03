@@ -1,6 +1,6 @@
-#### Prepare three-day onset inputs, freeze logistic settings, or evaluate logistic probabilities.
+#### Prepare three-day onset inputs, freeze settings, or evaluate either model's probabilities.
 #### Preparation retains the existing features; freezing verifies and saves the cohort and folds.
-#### Evaluation fits only logistic regression from a verified freeze and saves paired results.
+#### Each model family runs from its own verified freeze and saves paired results.
 
 import argparse
 from pathlib import Path
@@ -14,11 +14,13 @@ from onset_prediction.workflow import run_feasibility
 
 
 def main(argv=None):
-    #### Read stage-specific paths and run preparation, freezing or logistic evaluation.
+    #### Read stage-specific paths and run preparation, freezing or probability evaluation.
     parser = argparse.ArgumentParser(description="Prepare or evaluate three-day onset probabilities.")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--freeze-logistic", action="store_true")
     modes.add_argument("--evaluate-logistic", action="store_true")
+    modes.add_argument("--freeze-forest", action="store_true")
+    modes.add_argument("--evaluate-forest", action="store_true")
     parser.add_argument("--processed-dir", type=Path, default=protocol.ROOT / "data/processed/primary_1400_2022")
     parser.add_argument("--preparation-dir", type=Path, default=protocol.ROOT.parent / "results/primary_1400_2022")
     parser.add_argument("--history-reference-dir", type=Path,
@@ -31,11 +33,34 @@ def main(argv=None):
                         default=protocol.ROOT.parent / "results/onset_logistic_2022_v1/frozen")
     parser.add_argument("--evaluation-dir", type=Path,
                         default=protocol.ROOT.parent / "results/onset_logistic_2022_v1/evaluation")
+    parser.add_argument("--logistic-frozen-dir", type=Path,
+                        default=protocol.ROOT.parent / "results/onset_logistic_2022_v1/frozen")
+    parser.add_argument("--forest-frozen-dir", type=Path,
+                        default=protocol.ROOT.parent / "results/onset_forest_2022_v1/frozen")
+    parser.add_argument("--forest-evaluation-dir", type=Path,
+                        default=protocol.ROOT.parent / "results/onset_forest_2022_v1/evaluation")
     args = parser.parse_args(argv)
 
     if args.freeze_logistic or args.evaluate_logistic:
         return run_logistic_stage(args)
+    if args.freeze_forest or args.evaluate_forest:
+        return run_forest_stage(args)
     return run_preparation(args)
+
+
+def run_forest_stage(args):
+    #### Freeze shared logistic inputs or evaluate the forest using its verified current freeze.
+    if args.freeze_forest:
+        from onset_prediction.forest_freezing import freeze_forest
+        result = freeze_forest(args.processed_output_dir, args.results_dir,
+                               args.logistic_frozen_dir, args.forest_frozen_dir)
+        print(f"Forest protocol frozen: {result['participants']} participants, {result['days']} days.")
+        print(f"Frozen inputs: {result['directory']}")
+        return result
+    from onset_prediction.evaluation import run_forest
+    result = run_forest(args.forest_frozen_dir, args.forest_evaluation_dir)
+    print(f"Forest evaluation complete: {result.resolve()}")
+    return result
 
 
 def run_logistic_stage(args):

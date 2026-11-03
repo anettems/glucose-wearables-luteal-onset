@@ -1,9 +1,9 @@
 # Three-day onset probability analysis
 
-This folder implements preparation and logistic regression for protocol
+This folder implements preparation, logistic regression and random forest for protocol
 `2026-11-03-onset-3d-v1`, described in the workspace's `EVALUATION_PROTOCOL.md`.
 The preparation and freeze stages do not fit models or generate predictions.
-The evaluation stage fits logistic regression only; random forest is not implemented yet.
+Each model family has a separate freeze and evaluation stage, using the same cohort and folds.
 
 From the thesis workspace, using the existing environment:
 
@@ -16,6 +16,12 @@ code/.venv/Scripts/python.exe code/onset_prediction/main.py --freeze-logistic
 
 # Verify the freeze, tune C using validation participants, and evaluate held-out probabilities.
 code/.venv/Scripts/python.exe code/onset_prediction/main.py --evaluate-logistic
+
+# Copy the verified logistic cohort, folds and participant draws; freeze forest settings.
+code/.venv/Scripts/python.exe code/onset_prediction/main.py --freeze-forest
+
+# Tune minimum leaf size and evaluate random-forest probabilities.
+code/.venv/Scripts/python.exe code/onset_prediction/main.py --evaluate-forest
 ```
 
 The entry point reads audited data from `code/data/processed/primary_1400_2022`
@@ -96,9 +102,44 @@ retains all days of each selected participant, including repeated selections,
 and is identical across input sets. Use the same draws for random forest later.
 Percentile intervals are conditional on the fitted cross-validation models.
 
+## Random forest
+
+The forest uses 100 trees, maximum depth 5, square-root feature selection, Gini
+splits, bootstrap samples of the training-set size and no class weighting.
+Only minimum leaf size (1, 5 or 10) is selected, using mean validation average
+precision across the same three folds. Exact ties select the larger leaf size.
+Replacement medians are fitted on training participants only and shared wearable
+predictors use identical medians across input sets and model families. Forest
+inputs are not scaled. The random seed is 20261020 and n_jobs=1 is fixed.
+
+`--freeze-forest` reads the existing logistic input freeze as a historical data
+snapshot: it verifies its files, original inputs, numerical versions and agreed
+shared design. It also verifies the original feasibility preparation and checks
+the two cohorts against each other. It does not require historical evaluation
+code to equal the newly extended code, and does not read logistic performance
+results. The new forest freeze records all current sources and settings before
+fitting. Each evaluation still requires its own current-source freeze; rerunning
+logistic regression with changed evaluation sources requires a fresh freeze and
+new output destinations. Existing snapshots and results are never overwritten.
+
+The forest freeze copies the logistic observations, reference links, test and
+validation assignments, feasibility tables and all 2,000 bootstrap participant
+draws byte for byte. Both loaders and the fitting loop check the paired cohort,
+participant separation and preprocessing feasibility.
+
+Default paths are `results/onset_forest_2022_v1/frozen` and its sibling
+`evaluation` directory. Override them with `--forest-frozen-dir` and
+`--forest-evaluation-dir`; select a different shared logistic snapshot with
+`--logistic-frozen-dir`. Output records include all candidate validation
+probabilities/scores, selected leaf sizes, replacement medians, complete fitted
+forests, test probabilities, calibration bins, bootstrap intervals and the
+within-forest combined-minus-wearable AP difference. No thresholds or alerts
+are used and no other forest settings are tuned.
+
 Files: `protocol.py` records settings; `outcomes.py` constructs labels;
 `features.py` reuses and checks features; `folds.py` allocates and audits folds;
 `workflow.py` saves the report and provenance; `main.py` provides the entry point.
-`logistic.py` fits/tunes models; `metrics.py` assesses probabilities and paired
+`logistic.py` and `forest.py` fit/tune their model families; `metrics.py` assesses probabilities and paired
 uncertainty; `freezing.py` protects the saved design and inputs; `evaluation.py`
-runs the logistic comparison; `report.py` writes its generated report.
+runs either model comparison; `forest_freezing.py` saves/verifies the forest freeze;
+`report.py` writes the generated model report.

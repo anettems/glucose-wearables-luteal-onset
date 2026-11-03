@@ -36,12 +36,12 @@ def probability_metrics(predictions):
             "brier_score": float(np.mean(np.square(probabilities - labels)))}
 
 
-def validate_paired(predictions, observations, assignments):
+def validate_paired(predictions, observations, assignments, model_family="logistic_regression"):
     #### Require exactly one prediction per saved key, outcome and test fold for all input sets.
     if set(predictions.input_set) != set(INPUT_SETS):
         raise ValueError("Expected exactly the three agreed input sets")
-    if set(predictions.model_family) != {"logistic_regression"}:
-        raise ValueError("Unexpected model family in logistic evaluation")
+    if model_family not in ("logistic_regression", "random_forest") or set(predictions.model_family) != {model_family}:
+        raise ValueError("Unexpected model family in paired evaluation")
     columns = protocol.KEY + [protocol.TARGET, "test_fold"]
     expected = observations[protocol.KEY + [protocol.TARGET]].merge(
         assignments, on="id", how="left", validate="many_to_one")[columns]
@@ -116,17 +116,17 @@ def interval_record(values):
             "valid_resamples": len(finite), "requested_resamples": len(values)}
 
 
-def summary_tables(predictions, bootstrap):
+def summary_tables(predictions, bootstrap, model_family="logistic_regression"):
     #### Summarise pooled model estimates and the paired glucose contribution.
     rows, estimates = [], {}
     for name in INPUT_SETS:
         estimates[name] = probability_metrics(predictions.loc[predictions.input_set.eq(name)])
         for metric in METRICS:
-            rows.append({"model_family": "logistic_regression", "input_set": name, "metric": metric,
+            rows.append({"model_family": model_family, "input_set": name, "metric": metric,
                          "estimate": estimates[name][metric], "prevalence": estimates[name]["prevalence"],
                          **interval_record(bootstrap[f"{name}_{metric}"])})
     difference = estimates["combined"]["average_precision"] - estimates["wearable"]["average_precision"]
-    paired = {"model_family": "logistic_regression", "comparison": "combined_minus_wearable",
+    paired = {"model_family": model_family, "comparison": "combined_minus_wearable",
               "metric": "average_precision_difference", "estimate": difference,
               **interval_record(bootstrap["combined_minus_wearable_average_precision"])}
     return pd.DataFrame(rows), pd.DataFrame([paired])

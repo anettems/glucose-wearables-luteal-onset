@@ -79,6 +79,21 @@ use `--processed-output-dir` and `--results-dir` for later runs. Input locations
 can be set with `--processed-dir`, `--preparation-dir` and `--frozen-dir`.
 # Glucose phase and successive-cycle assessment
 
+## Thesis figures
+
+Generate compact vector figures from the verified, completed cycle assessment:
+
+```powershell
+code/.venv/Scripts/python.exe code/onset_assessment/thesis_figures.py --latex-figures-dir latex/figures
+```
+
+The main figure combines raw glucose phase contrasts and successive-cycle comparisons.
+A supporting four-panel figure shows variability and the existing personal deviation.
+Both have embedded PDF fonts and 300 dpi PNG previews. Participant counts, means and
+intervals come from saved tables, with input hashes verified before plotting. No
+analyses are refitted. Fresh result paths are required and existing assets are protected.
+The default output is `results/glucose_thesis_figures_2022_v2`.
+
 Run from the thesis workspace:
 
 ```powershell

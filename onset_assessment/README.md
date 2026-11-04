@@ -42,3 +42,38 @@ appear after onset, but they do not measure performance against all negative
 days or independently verify the biological date of ovulation. Missing-data
 selection, small event counts and possible reference-date uncertainty remain
 relevant when interpreting the patterns.
+
+## Actual glucose predictors on positive and negative days
+
+Run the additional comparison with:
+
+```powershell
+code/.venv/Scripts/python.exe code/onset_assessment/glucose_comparison.py
+```
+
+This reads the exact six glucose predictors from the shared model cohort and
+checks them against the saved logistic model input freeze. Positive days have
+an exact reference onset within the next three calendar days; negative days
+have no start on all three known future days. Require both classes within a
+participant for paired comparisons, saving coverage for all 41 participants.
+No minimum count beyond one day in each class is imposed; report actual counts.
+
+For each feature, compare positive and negative means and medians within each
+participant. Average participant differences equally and use 2,000 participant
+bootstrap draws with seed 20261021 for percentile intervals. Also calculate
+each person's single-feature AUC with a fixed higher-value direction and half
+credit for ties, then average these AUCs across participants. This describes
+directional overlap, rather than fitted or cross-validated model performance.
+
+The distribution figure subtracts each person's negative-day mean for display
+only, with equal total weight per person within each class. These label-based
+display values are never used as prediction inputs. The second figure shows
+every participant's mean difference and the group interval in native units.
+Neither feature windows nor model settings change, and no models are refitted.
+
+Intermediate display data and paired observation keys/features go under
+`code/data/processed/glucose_feature_assessment_2022_v1`. Coverage, per-person
+results, summary intervals, PNG/PDF figures, a report and provenance go under
+`results/glucose_feature_assessment_2022_v1`. Both output folders must be fresh;
+use `--processed-output-dir` and `--results-dir` for later runs. Input locations
+can be set with `--processed-dir`, `--preparation-dir` and `--frozen-dir`.

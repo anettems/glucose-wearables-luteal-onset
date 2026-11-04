@@ -77,3 +77,42 @@ results, summary intervals, PNG/PDF figures, a report and provenance go under
 `results/glucose_feature_assessment_2022_v1`. Both output folders must be fresh;
 use `--processed-output-dir` and `--results-dir` for later runs. Input locations
 can be set with `--processed-dir`, `--preparation-dir` and `--frozen-dir`.
+# Glucose phase and successive-cycle assessment
+
+Run from the thesis workspace:
+
+```powershell
+code/.venv/Scripts/python.exe code/onset_assessment/cycle_main.py
+```
+
+Choose fresh `--results-dir` and `--processed-output-dir` destinations for another run.
+The defaults are `results/glucose_cycle_assessment_2022_v1` and
+`code/data/processed/glucose_cycle_assessment_2022_v1`.
+
+This independent descriptive analysis uses all quality-approved 2022 CGM from the
+verified onset preparation, regardless of wearable availability. Match each glucose
+summary and its unchanged 14-day personal deviation to the actual source day.
+Identify cycles between consecutive exact menstrual-label starts; audit missing
+labels/dates, missing phases and phase reversals. Leading/trailing partial cycles
+remain in participant coverage counts. Do not assume an initial menstrual block
+begins on its first observed day.
+
+Compare phase means and medians with the same cycle's follicular values, requiring
+at least three measured days and 50% labelled-phase coverage. Average cycle effects
+within participants before group estimates and 2,000 participant bootstraps
+(seed 20261021). A stricter five-day sensitivity retains the 50% requirement.
+Raw median glucose and variability are the main measurements; the existing personal
+glucose deviation is secondary. Report all phase-specific exclusions and sample sizes.
+
+Successive-cycle comparisons require adjacent bounded cycles, never skipping missing
+comparisons. Report sign agreement and absolute effect-size change, averaging pairs
+within each person first. These are descriptive repeatability measures, not model
+accuracy. Shared population direction alone can cause agreement; 50% is not a formal
+chance null. No predictive model, new feature window or hormone adjustment is added.
+
+Focused checks:
+
+```powershell
+$env:PYTHONPATH='code'
+code/.venv/Scripts/python.exe -m unittest discover -s code/onset_assessment/tests -p test_cycles.py
+```

@@ -1,9 +1,9 @@
-#### Describe glucose phase contrasts within fully observed menstrual cycles in 2022.
+#### Describe glucose phase contrasts within menstrual cycles in the 2022 data.
 #### Use existing quality-approved CGM on its actual source day, independently of wearable
-#### eligibility. Bound cycles by consecutive exact menstrual-label starts. Audit incomplete,
-#### missing-label and non-sequential cycles. Compare phases with the same cycle's follicular
-#### phase, then average cycles within participants. Assess successive-cycle agreement without
-#### selecting participants by effect direction. These are descriptive, retrospective analyses.
+#### eligibility. Audit cycles between exact menstrual-label starts and, when requested, retain
+#### fully observed follicular and luteal phases from the partial cycle before the first start.
+#### Compare phases with the same cycle's follicular phase, then average within participants.
+#### Assess successive-cycle agreement using the resulting descriptive contrasts.
 
 import numpy as np
 import pandas as pd
@@ -36,8 +36,33 @@ def source_day_data(audit):
     return audit[KEY + ['phase']].merge(glucose, on=KEY, how='left', validate='one_to_one')
 
 
-def identify_cycles(days):
-    #### Retain every bounded interval and flag gaps, unknown labels and phase reversals.
+def leading_phase_pair(group, next_start):
+    #### Find fully observed follicular and luteal phases before the first exact menstrual start.
+    before_start = group.loc[group.day_in_study.lt(next_start)]
+    last_menstrual_day = before_start.loc[before_start.phase.eq('menstrual'), 'day_in_study'].max()
+    selected = before_start.loc[before_start.day_in_study.gt(last_menstrual_day)]
+    if selected.empty or len(selected) != next_start - last_menstrual_day - 1:
+        return None
+
+    #### Check every intervening day and the phase order, including the fertile window.
+    phases = selected.phase.fillna('').to_numpy()
+    phase_runs = phases[np.r_[True, phases[1:] != phases[:-1]]].tolist()
+    if phase_runs != PHASES[1:]:
+        return None
+
+    #### The first follicular day identifies this partial cycle. Ordinal zero makes it
+    #### adjacent to the first bounded cycle for repeatability. Use only the agreed phase pair.
+    cycle_start = int(selected.day_in_study.iloc[0])
+    record = {'id': group.id.iloc[0], 'study_interval': group.study_interval.iloc[0],
+              'cycle_start': cycle_start, 'next_start': next_start, 'cycle_number': 0,
+              'length_days': len(selected), 'accepted': True, 'reason': 'observed_phase_pair'}
+    pair_days = selected.loc[selected.phase.isin(['follicular', 'luteal'])].assign(
+        cycle_start=cycle_start, cycle_number=0, accepted=True)
+    return record, pair_days
+
+
+def identify_cycles(days, allow_partial_cycles=False):
+    #### Audit bounded cycles and optionally retain a fully observed leading phase pair.
     validate_keys(days)
     records, assigned = [], []
     for (person, interval), group in days.groupby(['id', 'study_interval']):
@@ -46,6 +71,13 @@ def identify_cycles(days):
         consecutive = group.day_in_study.diff().eq(1)
         starts = group.loc[group.phase.eq('menstrual') & previous.notna()
                            & previous.ne('menstrual') & consecutive, 'day_in_study'].tolist()
+        if allow_partial_cycles and starts:
+            partial = leading_phase_pair(group, starts[0])
+            if partial is not None:
+                record, selected = partial
+                records.append(record)
+                assigned.append(selected)
+
         for ordinal, (start, end) in enumerate(zip(starts[:-1], starts[1:]), 1):
             selected = group.loc[group.day_in_study.ge(start) & group.day_in_study.lt(end)].copy()
             codes = selected.phase.map({name: index for index, name in enumerate(PHASES)})
@@ -62,7 +94,7 @@ def identify_cycles(days):
             selected['accepted'] = accepted
             assigned.append(selected)
     if not records:
-        raise ValueError('No cycles bounded by exact menstrual starts')
+        raise ValueError('No cycle intervals could be identified')
     return pd.DataFrame(records), pd.concat(assigned, ignore_index=True)
 
 

@@ -125,6 +125,24 @@ within each person first. These are descriptive repeatability measures, not mode
 accuracy. Shared population direction alone can cause agreement; 50% is not a formal
 chance null. No predictive model, new feature window or hormone adjustment is added.
 
+To include partial cycles in the luteal–follicular comparison, run:
+
+```powershell
+code/.venv/Scripts/python.exe code/onset_assessment/cycle_main.py --allow-partial-cycles `
+    --results-dir results/glucose_cycle_assessment_2022_v3 `
+    --processed-output-dir code/data/processed/glucose_cycle_assessment_2022_v3
+```
+
+The leading partial cycle is eligible when consecutive labels run from a menstrual
+day through the follicular, fertile-window and luteal phases to the first exact
+menstrual start. This identifies the full follicular and luteal phases and allows
+the same glucose coverage rules to be used. The final partial cycle lacks an
+observed next menstrual start. The leading contrast can be paired with the following
+cycle when both contrasts are available. Partial cycles have `cycle_number` 0 and
+use the first follicular day as their `cycle_start` key. `length_days` spans that
+day through the last luteal day. The processed partial-cycle rows contain the two
+phases used in the contrast.
+
 Focused checks:
 
 ```powershell

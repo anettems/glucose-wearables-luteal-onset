@@ -1,4 +1,4 @@
-#### Verify calendar boundaries, source-day alignment, paired phase coverage and repeatability.
+#### Verify full and partial cycle boundaries, glucose alignment, phase coverage and repeatability.
 #### Synthetic values make expected contrasts explicit without relying on project outcomes.
 
 import unittest
@@ -49,6 +49,43 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(len(assigned), 30)
         self.assertEqual(assigned.day_in_study.min(), 2)
         self.assertEqual(assigned.day_in_study.max(), 31)
+
+    def test_partial_cycle_contrasts_and_repeatability(self):
+        #### Start the record during menstruation and retain its subsequent observed phase pair.
+        days = synthetic_days().loc[lambda data: data.day_in_study.ge(3)]
+        cycles, assigned = identify_cycles(days, allow_partial_cycles=True)
+        self.assertEqual(cycles.cycle_number.tolist(), [0, 1])
+        partial_days = assigned.loc[assigned.cycle_number.eq(0)]
+        self.assertEqual(partial_days.day_in_study.tolist(), [5, 6, 7, 8, 12, 13, 14, 15, 16])
+        contrasts = cycle_contrasts(phase_summaries(assigned))
+        self.assertEqual(set(contrasts.loc[contrasts.cycle_number.eq(0), 'phase']), {'luteal'})
+        pairs = adjacent_pairs(contrasts)
+        self.assertEqual(set(pairs.phase), {'luteal'})
+        self.assertEqual(set(pairs.earlier_start), {5})
+        self.assertEqual(set(pairs.cycle_start), {17})
+        np.testing.assert_allclose(pairs.earlier, 2.)
+
+        #### Below three observed days the partial follicular phase is ineligible.
+        assigned.loc[assigned.day_in_study.isin([5, 6]), 'glucose_median_mmol_l'] = np.nan
+        contrasts = cycle_contrasts(phase_summaries(assigned))
+        partial_glucose = contrasts.cycle_number.eq(0) & contrasts.measurement.eq('glucose_median_mmol_l')
+        self.assertFalse(partial_glucose.any())
+
+    def test_partial_cycle_requires_observed_phase_boundaries(self):
+        #### Gaps, missing labels and phase reversals break the leading phase sequence.
+        for phase in [None, np.nan, 'follicular']:
+            days = synthetic_days().loc[lambda data: data.day_in_study.ge(3)].copy()
+            if phase is None:
+                days = days.loc[days.day_in_study.ne(10)]
+            else:
+                days.loc[days.day_in_study.eq(10), 'phase'] = phase
+            cycles, _ = identify_cycles(days, allow_partial_cycles=True)
+            self.assertEqual(cycles.cycle_number.tolist(), [1])
+
+        #### Without the preceding menstrual label or following start, a phase may be cut short.
+        days = synthetic_days().loc[lambda data: data.day_in_study.between(5, 31)]
+        with self.assertRaises(ValueError):
+            identify_cycles(days, allow_partial_cycles=True)
 
     def test_unknown_gap_reversal(self):
         #### Reject missing dates, unknown labels and reverse phase order within bounded cycles.

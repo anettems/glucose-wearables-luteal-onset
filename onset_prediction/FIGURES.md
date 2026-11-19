@@ -7,7 +7,7 @@ code/.venv/Scripts/python.exe code/onset_prediction/thesis_figures.py --latex-fi
 ```
 
 This creates vector PDFs, 300 dpi PNG previews and `figure_manifest.json` under
-`results/onset_thesis_figures_2022_v1`, and copies the four new PDFs into
+`results/onset_thesis_figures_2022_v2`, and copies the four new PDFs into
 `latex/figures`. Existing files are never overwritten. For a later run, supply a
 fresh `--results-dir` and omit the LaTeX export when the assets already exist.
 
@@ -19,7 +19,7 @@ Their sibling `frozen` directories must be available.
 The figures show:
 
 1. The 14:00 prediction cutoff, prior-day glucose, overnight wearable measurements,
-   past-only history windows and illustrative three-day outcomes.
+   and illustrative three-day outcomes.
 2. Five participant-disjoint test folds, validation for model selection,
    training-only preprocessing and refitting before separate testing.
 3. Pooled average precision (AP) for all six configurations, together with the

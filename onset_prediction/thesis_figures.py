@@ -31,7 +31,7 @@ LABELS = {'glucose': 'Glucose only', 'wearable': 'Wearable only', 'combined': 'C
 FAMILY_LABELS = {'logistic_regression': 'Logistic regression', 'random_forest': 'Random forest'}
 COLOURS = {'glucose': '#646464', 'wearable': '#356783', 'combined': '#B75625'}
 MARKERS = {'glucose': 's', 'wearable': 'o', 'combined': 'D'}
-STEMS = ('onset_prediction_timeline_v1', 'onset_participant_evaluation_v1',
+STEMS = ('onset_prediction_timeline_v2', 'onset_participant_evaluation_v1',
          'onset_predictive_value_v1', 'onset_calibration_v1')
 STYLE = {'font.family': 'serif', 'font.serif': ['STIXGeneral'], 'mathtext.fontset': 'stix',
          'font.size': 9, 'axes.labelsize': 9, 'axes.titlesize': 10,
@@ -213,7 +213,7 @@ def main():
     parser.add_argument('--forest-dir', type=Path,
                         default=WORKSPACE / 'results/onset_forest_2022_v1/evaluation')
     parser.add_argument('--results-dir', type=Path,
-                        default=WORKSPACE / 'results/onset_thesis_figures_2022_v1')
+                        default=WORKSPACE / 'results/onset_thesis_figures_2022_v2')
     parser.add_argument('--latex-figures-dir', type=Path)
     args = parser.parse_args()
     run(args.logistic_dir.resolve(), args.forest_dir.resolve(), args.results_dir.resolve(),

@@ -35,68 +35,51 @@ def diagram_axis(ax, title):
 
 def measurement_panel(ax):
     #### Separate completed measurements, the prediction cutoff and future outcome days.
-    diagram_axis(ax, '(a) Measurements available at prediction')
-    boundaries = [.03, .24, .45, .62, .79, .96]
+    diagram_axis(ax, '(a) Prediction timing')
+    boundaries = [.025, .215, .405, .595, .785, .975]
     labels = ['$t-1$', '$t$', '$t+1$', '$t+2$', '$t+3$']
     for left, right, label in zip(boundaries[:-1], boundaries[1:], labels):
-        ax.text((left + right) / 2, .9, label, ha='center', fontsize=10)
-        ax.plot([left, left], [.16, .81], color='#D6D6D6', lw=.6)
-    ax.plot([.96, .96], [.16, .81], color='#D6D6D6', lw=.6)
-    box(ax, .03, .55, .21, .22, 'Completed glucose\nday $t-1$', size=8)
-    box(ax, .18, .25, .16, .21, 'Main sleep\nending on $t$', size=8)
-    cutoff = .24 + .21 * 14 / 24
-    ax.plot([cutoff, cutoff], [.12, .82], color=ORANGE, lw=1.3)
-    ax.text(cutoff + .012, .47, '14:00\nprediction', color=ORANGE, va='center', fontsize=8)
-    box(ax, .45, .55, .51, .22, 'Reference start on any of the next three days',
-        GREEN, '#F0F6F3', size=8)
-    ax.text(.7, .29, 'Future labels define the outcome;\nfuture sensors are not model inputs.',
-            ha='center', va='center', fontsize=8)
-    ax.text(.03, -.015, 'Sleep timing is schematic; the retained sleep must end by 14:00.',
-            fontsize=8, color=GREY)
+        ax.text((left + right) / 2, .92, label, ha='center', va='center', fontsize=10)
+    for boundary in boundaries:
+        ax.plot([boundary, boundary], [.25, .80], color='#D6D6D6', lw=.6, zorder=1)
 
+    prior_day, prediction_day, first_future_day = boundaries[:3]
+    box(ax, prior_day, .55, prediction_day - prior_day, .23, 'Daily glucose')
+    box(ax, .165, .25, .135, .23, 'Main sleep')
+    box(ax, first_future_day, .55, boundaries[-1] - first_future_day, .23,
+        'Outcome window', GREEN, '#F0F6F3')
 
-def history_panel(ax):
-    #### Show past calendar windows with open right edges that exclude the current value.
-    diagram_axis(ax, '(b) Personal history on the aligned prediction-day axis')
-    ax.set_xlim(-17, 1.8)
-    for y, start, colour, label in [(.68, -14, BLUE, 'Median reference: at least 7 observed days'),
-                                    (.35, -7, GREEN, 'Trend: at least 4 observed days')]:
-        ax.plot([start, -.15], [y, y], color=colour, lw=5, solid_capstyle='butt')
-        ax.plot([start], [y], '|', color=colour, ms=12, mew=1.2)
-        ax.plot([0], [y], 'o', color=colour, mfc='white', ms=5, zorder=3)
-        ax.text(start, y + .13, label, fontsize=8, va='bottom')
-    for x, label in [(-14, '$t-14$'), (-7, '$t-7$'), (0, '$t$')]:
-        ax.text(x, .08, label, ha='center', fontsize=9)
-    ax.plot([0, 0], [.2, .92], color=ORANGE, lw=.8, ls='--')
-    ax.text(.55, .52, 'Current\naligned\nvalue', color=ORANGE, fontsize=8, va='center')
-    ax.text(-16.8, -.15, 'Histories exclude $t$ and future values. For glucose, $x(s)$ summarises day $s-1$.',
-            fontsize=8)
+    #### Place the cutoff at 14 hours into the prediction day.
+    cutoff = prediction_day + (first_future_day - prediction_day) * 14 / 24
+    ax.plot([cutoff, cutoff], [.21, .81], color=ORANGE, lw=1.3)
+    ax.text(cutoff, .12, '14:00 prediction', color=ORANGE, ha='center', va='center',
+            fontsize=9)
 
 
 def outcome_panel(ax):
     #### Illustrate positive, negative and unknown outcomes using future start statuses.
-    diagram_axis(ax, '(c) Outcome examples from the full phase-label timeline')
-    centres = [.48, .60, .72]
+    diagram_axis(ax, '(c) Example start statuses')
+    centres = [.135, .365, .595]
     for x, label in zip(centres, ['$t+1$', '$t+2$', '$t+3$']):
-        ax.text(x, .9, label, ha='center', fontsize=9)
-    examples = [('Positive', ['No start', 'Start', '?'], '1', GREEN),
-                ('Negative', ['No start'] * 3, '0', BLUE),
-                ('Unknown', ['No start', '?', 'No start'], 'Excluded', GREY)]
-    for y, (label, statuses, result, colour) in zip([.64, .37, .10], examples):
-        ax.text(.03, y + .075, label, fontsize=9, va='center')
+        ax.text(x, .92, label, ha='center', va='center', fontsize=10)
+    ax.text(.84, .92, 'Outcome', ha='center', va='center', fontsize=9)
+
+    #### Include a positive example with an unknown day to show that a known start suffices.
+    examples = [('Positive', ['No start', 'Start', 'Unknown'], GREEN),
+                ('Negative', ['No start'] * 3, BLUE),
+                ('Unknown', ['No start', 'Unknown', 'No start'], GREY)]
+    for y, (outcome, statuses, colour) in zip([.62, .35, .08], examples):
         for x, status in zip(centres, statuses):
-            box(ax, x - .055, y, .11, .15, status, colour, size=7.5)
-        ax.text(.84, y + .075, result, fontsize=9, va='center', color=colour)
-    ax.text(.03, -.16, '? = unknown start status. A start on $t$ does not count towards the outcome.',
-            fontsize=8)
+            box(ax, x - .11, y, .22, .20, status, colour)
+        ax.text(.84, y + .10, outcome, ha='center', va='center', fontsize=9, color=colour)
 
 
 def prediction_timeline():
-    #### Combine measurement timing, past histories and example future outcomes.
-    fig, axes = plt.subplots(3, 1, figsize=(6.5, 6.1))
-    fig.subplots_adjust(left=.025, right=.98, bottom=.07, top=.95, hspace=.5)
-    for draw, ax in zip((measurement_panel, history_panel, outcome_panel), axes):
-        draw(ax)
+    #### Stack measurement timing and future outcomes with the original panel letters.
+    fig, (measurements, outcomes) = plt.subplots(2, 1, figsize=(6.5, 3.2))
+    fig.subplots_adjust(left=.025, right=.975, bottom=.03, top=.90, hspace=.25)
+    measurement_panel(measurements)
+    outcome_panel(outcomes)
     return fig
 
 

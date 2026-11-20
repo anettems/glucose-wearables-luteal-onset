@@ -1,8 +1,8 @@
-#### Generate four thesis figures for the completed 2022 three-day forecasting analysis.
+#### Generate five thesis figures for the completed 2022 three-day forecasting analysis.
 #### Read verified logistic-regression and random-forest results on the same held-out days.
 #### Export vector PDFs, 300 dpi previews and a provenance manifest to a fresh results folder.
 #### Optionally copy new PDFs into latex/figures. Existing files are never overwritten.
-#### The figures describe timing, participant folds, paired AP and fixed-bin calibration.
+#### The figures describe timing, outcomes, participant folds, paired AP and calibration.
 #### This reporting step does not fit models, alter outcomes or introduce decision thresholds.
 
 import argparse
@@ -22,7 +22,8 @@ from matplotlib.ticker import MaxNLocator, PercentFormatter
 import numpy as np
 
 from onset_prediction.figure_data import FAMILIES, digest, load_results
-from onset_prediction.figure_diagrams import evaluation_diagram, prediction_timeline
+from onset_prediction.figure_diagrams import (evaluation_diagram, measurement_timeline,
+                                             outcome_examples)
 
 
 WORKSPACE = Path(__file__).resolve().parents[2]
@@ -31,7 +32,7 @@ LABELS = {'glucose': 'Glucose only', 'wearable': 'Wearable only', 'combined': 'C
 FAMILY_LABELS = {'logistic_regression': 'Logistic regression', 'random_forest': 'Random forest'}
 COLOURS = {'glucose': '#646464', 'wearable': '#356783', 'combined': '#B75625'}
 MARKERS = {'glucose': 's', 'wearable': 'o', 'combined': 'D'}
-STEMS = ('onset_prediction_timeline_v2', 'onset_participant_evaluation_v1',
+STEMS = ('onset_measurement_timing_v1', 'onset_outcome_examples_v1', 'onset_participant_evaluation_v1',
          'onset_predictive_value_v1', 'onset_calibration_v1')
 STYLE = {'font.family': 'serif', 'font.serif': ['STIXGeneral'], 'mathtext.fontset': 'stix',
          'font.size': 9, 'axes.labelsize': 9, 'axes.titlesize': 10,
@@ -180,9 +181,9 @@ def run(logistic, forest, destination, latex_figures=None):
     tables, config, inputs = load_results(logistic, forest)
     destination.mkdir(parents=True)
     with plt.rc_context(STYLE):
-        figures = (prediction_timeline(), evaluation_diagram(),
+        figures = (measurement_timeline(), outcome_examples(), evaluation_diagram(),
                    performance_figure(tables), calibration_figure(tables))
-        for fig, stem in zip(figures, STEMS):
+        for fig, stem in zip(figures, STEMS, strict=True):
             export_figure(fig, destination, stem)
     outputs = sorted(destination.iterdir())
     if latex_figures is not None:
@@ -202,7 +203,7 @@ def run(logistic, forest, destination, latex_figures=None):
                              **{name: version(name) for name in ('matplotlib', 'numpy', 'pandas', 'scikit-learn')}},
                 'style': STYLE, 'png_dpi': 300, 'bootstrap_scope': config['bootstrap_scope']}
     (destination / 'figure_manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-    print(f'Exported four verified figures to {destination}', flush=True)
+    print(f'Exported {len(STEMS)} verified figures to {destination}', flush=True)
 
 
 def main():
@@ -213,7 +214,7 @@ def main():
     parser.add_argument('--forest-dir', type=Path,
                         default=WORKSPACE / 'results/onset_forest_2022_v1/evaluation')
     parser.add_argument('--results-dir', type=Path,
-                        default=WORKSPACE / 'results/onset_thesis_figures_2022_v2')
+                        default=WORKSPACE / 'results/onset_thesis_figures_2022_v3')
     parser.add_argument('--latex-figures-dir', type=Path)
     args = parser.parse_args()
     run(args.logistic_dir.resolve(), args.forest_dir.resolve(), args.results_dir.resolve(),

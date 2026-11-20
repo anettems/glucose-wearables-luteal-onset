@@ -26,16 +26,20 @@ def arrow(ax, start, end):
                 arrowprops={'arrowstyle': '-|>', 'color': GREY, 'lw': .8})
 
 
-def diagram_axis(ax, title):
-    #### Remove chart furniture and add a consistent panel heading.
+def diagram_axis(ax, title=''):
+    #### Hide the axes and format a panel heading when supplied.
     ax.set(xlim=(0, 1), ylim=(0, 1))
     ax.axis('off')
     ax.set_title(title, loc='left', fontsize=10, pad=7)
 
 
-def measurement_panel(ax):
+def measurement_timeline():
     #### Separate completed measurements, the prediction cutoff and future outcome days.
-    diagram_axis(ax, '(a) Prediction timing')
+    fig, ax = plt.subplots(figsize=(6.5, 1.4))
+    fig.subplots_adjust(left=.025, right=.975, bottom=.03, top=.97)
+    diagram_axis(ax)
+
+    #### Draw equal-width calendar days so the cutoff can be placed within day t.
     boundaries = [.025, .215, .405, .595, .785, .975]
     labels = ['$t-1$', '$t$', '$t+1$', '$t+2$', '$t+3$']
     for left, right, label in zip(boundaries[:-1], boundaries[1:], labels):
@@ -54,11 +58,16 @@ def measurement_panel(ax):
     ax.plot([cutoff, cutoff], [.21, .81], color=ORANGE, lw=1.3)
     ax.text(cutoff, .12, '14:00 prediction', color=ORANGE, ha='center', va='center',
             fontsize=9)
+    return fig
 
 
-def outcome_panel(ax):
+def outcome_examples():
     #### Illustrate positive, negative and unknown outcomes using future start statuses.
-    diagram_axis(ax, '(c) Example start statuses')
+    fig, ax = plt.subplots(figsize=(6.5, 1.4))
+    fig.subplots_adjust(left=.025, right=.975, bottom=.03, top=.97)
+    diagram_axis(ax)
+
+    #### Place the three future days to the left of the resulting outcome.
     centres = [.135, .365, .595]
     for x, label in zip(centres, ['$t+1$', '$t+2$', '$t+3$']):
         ax.text(x, .92, label, ha='center', va='center', fontsize=10)
@@ -72,14 +81,6 @@ def outcome_panel(ax):
         for x, status in zip(centres, statuses):
             box(ax, x - .11, y, .22, .20, status, colour)
         ax.text(.84, y + .10, outcome, ha='center', va='center', fontsize=9, color=colour)
-
-
-def prediction_timeline():
-    #### Stack measurement timing and future outcomes with the original panel letters.
-    fig, (measurements, outcomes) = plt.subplots(2, 1, figsize=(6.5, 3.2))
-    fig.subplots_adjust(left=.025, right=.975, bottom=.03, top=.90, hspace=.25)
-    measurement_panel(measurements)
-    outcome_panel(outcomes)
     return fig
 
 

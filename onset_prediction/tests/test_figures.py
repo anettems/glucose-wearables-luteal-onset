@@ -14,9 +14,10 @@ import pandas as pd
 from onset_prediction.figure_data import validate_design, validate_estimates
 from onset_prediction.metrics import (bootstrap_metrics, calibration_bins, participant_draws,
                                       summary_tables)
-from onset_prediction.thesis_figures import (calibration_figure, check_destinations,
+from onset_prediction.thesis_figures import (STEMS, calibration_figure, check_destinations,
                                            export_figure, performance_figure)
-from onset_prediction.figure_diagrams import evaluation_diagram, prediction_timeline
+from onset_prediction.figure_diagrams import (evaluation_diagram, measurement_timeline,
+                                             outcome_examples)
 
 
 def synthetic_results():
@@ -106,23 +107,26 @@ class FigureExportTests(unittest.TestCase):
         self.assertEqual(sum(int(text.get_text()) for text in counts.texts), 12)
         plt.close(fig)
 
-    def test_four_exports_and_no_overwrite(self):
+    def test_figure_exports_and_no_overwrite(self):
         #### Export every diagram and result figure, retaining existing outputs on a repeat call.
         tables = synthetic_results()
         families = {name: tables for name in ('logistic_regression', 'random_forest')}
         with tempfile.TemporaryDirectory() as folder:
             destination = Path(folder)
-            figures = [prediction_timeline(), evaluation_diagram(),
+            figures = [measurement_timeline(), outcome_examples(), evaluation_diagram(),
                        performance_figure(families), calibration_figure(families)]
-            for index, fig in enumerate(figures):
-                export_figure(fig, destination, f'figure_{index}')
-            self.assertEqual(len(list(destination.iterdir())), 8)
+            for fig, stem in zip(figures, STEMS, strict=True):
+                export_figure(fig, destination, stem)
+            self.assertEqual(len(list(destination.iterdir())), 2 * len(STEMS))
             self.assertTrue(all(path.stat().st_size > 1000 for path in destination.iterdir()))
-            before = (destination / 'figure_0.pdf').read_bytes()
-            fig = prediction_timeline()
+
+            stem = 'onset_measurement_timing_v1'
+            pdf = destination / f'{stem}.pdf'
+            before = pdf.read_bytes()
+            fig = measurement_timeline()
             with self.assertRaises(FileExistsError):
-                export_figure(fig, destination, 'figure_0')
-            self.assertEqual((destination / 'figure_0.pdf').read_bytes(), before)
+                export_figure(fig, destination, stem)
+            self.assertEqual(pdf.read_bytes(), before)
             plt.close(fig)
 
     def test_output_location_rejected(self):

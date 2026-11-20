@@ -1,13 +1,13 @@
 # Three-day forecasting thesis figures
 
-Generate the four scientific figures from the thesis workspace:
+Generate the five scientific figures from the thesis workspace:
 
 ```powershell
 code/.venv/Scripts/python.exe code/onset_prediction/thesis_figures.py --latex-figures-dir latex/figures
 ```
 
 This creates vector PDFs, 300 dpi PNG previews and `figure_manifest.json` under
-`results/onset_thesis_figures_2022_v2`, and copies the four new PDFs into
+`results/onset_thesis_figures_2022_v3`, and copies the five new PDFs into
 `latex/figures`. Existing files are never overwritten. For a later run, supply a
 fresh `--results-dir` and omit the LaTeX export when the assets already exist.
 
@@ -18,13 +18,13 @@ Their sibling `frozen` directories must be available.
 
 The figures show:
 
-1. The 14:00 prediction cutoff, prior-day glucose, overnight wearable measurements,
-   and illustrative three-day outcomes.
-2. Five participant-disjoint test folds, validation for model selection,
+1. The 14:00 prediction cutoff, prior-day glucose and overnight wearable measurements.
+2. Examples of positive, negative and unknown three-day prediction outcomes.
+3. Five participant-disjoint test folds, validation for model selection,
    training-only preprocessing and refitting before separate testing.
-3. Pooled average precision (AP) for all six configurations, together with the
+4. Pooled average precision (AP) for all six configurations, together with the
    paired combined-minus-wearable AP difference within each model family.
-4. Observed frequencies against mean predicted probabilities in the ten fixed
+5. Observed frequencies against mean predicted probabilities in the ten fixed
    bins, with exact bin counts for all three input sets in each model family.
 
 The script verifies the hashes of the saved inputs and historical freeze links.
